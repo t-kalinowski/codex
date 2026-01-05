@@ -48,7 +48,7 @@ mod stream_events_utils;
 mod text_encoding;
 pub mod token_data;
 mod truncate;
-mod unified_exec;
+pub mod unified_exec;
 mod user_instructions;
 pub use model_provider_info::CHAT_WIRE_API_DEPRECATION_SUMMARY;
 pub use model_provider_info::DEFAULT_LMSTUDIO_PORT;

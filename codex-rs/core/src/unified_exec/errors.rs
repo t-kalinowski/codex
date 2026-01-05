@@ -2,7 +2,7 @@ use crate::exec::ExecToolCallOutput;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
-pub(crate) enum UnifiedExecError {
+pub enum UnifiedExecError {
     #[error("Failed to create unified exec session: {message}")]
     CreateSession { message: String },
     // Called "session" in the model's training.

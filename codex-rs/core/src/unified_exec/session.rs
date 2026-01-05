@@ -8,6 +8,7 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot::error::TryRecvError;
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::exec::ExecToolCallOutput;
@@ -74,7 +75,7 @@ pub(crate) struct OutputHandles {
 }
 
 #[derive(Debug)]
-pub(crate) struct UnifiedExecSession {
+pub struct UnifiedExecSession {
     session: ExecCommandSession,
     output_buffer: OutputBuffer,
     output_notify: Arc<Notify>,
@@ -123,7 +124,7 @@ impl UnifiedExecSession {
         }
     }
 
-    pub(super) fn writer_sender(&self) -> mpsc::Sender<Vec<u8>> {
+    pub fn writer_sender(&self) -> mpsc::Sender<Vec<u8>> {
         self.session.writer_sender()
     }
 
@@ -135,7 +136,7 @@ impl UnifiedExecSession {
         }
     }
 
-    pub(super) fn output_receiver(&self) -> tokio::sync::broadcast::Receiver<Vec<u8>> {
+    pub fn output_receiver(&self) -> tokio::sync::broadcast::Receiver<Vec<u8>> {
         self.session.output_receiver()
     }
 
@@ -147,18 +148,64 @@ impl UnifiedExecSession {
         Arc::clone(&self.output_drained)
     }
 
-    pub(super) fn has_exited(&self) -> bool {
+    pub fn has_exited(&self) -> bool {
         self.session.has_exited()
     }
 
-    pub(super) fn exit_code(&self) -> Option<i32> {
+    pub fn exit_code(&self) -> Option<i32> {
         self.session.exit_code()
     }
 
-    pub(super) fn terminate(&self) {
+    pub fn terminate(&self) {
         self.session.terminate();
         self.cancellation_token.cancel();
         self.output_task.abort();
+    }
+
+    pub async fn collect_output_until_deadline(&self, deadline: Instant) -> Vec<u8> {
+        const POST_EXIT_OUTPUT_GRACE: Duration = Duration::from_millis(50);
+
+        let mut collected: Vec<u8> = Vec::with_capacity(4096);
+        let mut exit_signal_received = self.cancellation_token.is_cancelled();
+        loop {
+            let drained_chunks;
+            let mut wait_for_output = None;
+            {
+                let mut guard = self.output_buffer.lock().await;
+                drained_chunks = guard.drain();
+                if drained_chunks.is_empty() {
+                    wait_for_output = Some(self.output_notify.notified());
+                }
+            }
+
+            if drained_chunks.is_empty() {
+                exit_signal_received |= self.cancellation_token.is_cancelled();
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining == Duration::ZERO {
+                    break;
+                }
+
+                let notified = wait_for_output.unwrap_or_else(|| self.output_notify.notified());
+                if exit_signal_received {
+                    let grace = remaining.min(POST_EXIT_OUTPUT_GRACE);
+                    if tokio::time::timeout(grace, notified).await.is_err() {
+                        break;
+                    }
+                    continue;
+                }
+
+                if tokio::time::timeout(remaining, notified).await.is_err() {
+                    break;
+                }
+                continue;
+            }
+
+            for chunk in drained_chunks {
+                collected.extend_from_slice(&chunk);
+            }
+        }
+
+        collected
     }
 
     async fn snapshot_output(&self) -> Vec<Vec<u8>> {

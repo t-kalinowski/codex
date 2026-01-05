@@ -450,7 +450,7 @@ impl UnifiedExecSessionManager {
             .await;
     }
 
-    pub(crate) async fn open_session_with_exec_env(
+    pub async fn open_session_with_exec_env(
         &self,
         env: &ExecEnv,
     ) -> Result<UnifiedExecSession, UnifiedExecError> {
@@ -632,7 +632,7 @@ impl UnifiedExecSessionManager {
             .map(|(process_id, _, _)| process_id)
     }
 
-    pub(crate) async fn terminate_all_sessions(&self) {
+    pub async fn terminate_all_sessions(&self) {
         let entries: Vec<SessionEntry> = {
             let mut sessions = self.session_store.lock().await;
             let entries: Vec<SessionEntry> =

@@ -40,8 +40,8 @@ mod errors;
 mod session;
 mod session_manager;
 
-pub(crate) use errors::UnifiedExecError;
-pub(crate) use session::UnifiedExecSession;
+pub use errors::UnifiedExecError;
+pub use session::UnifiedExecSession;
 
 pub(crate) const MIN_YIELD_TIME_MS: u64 = 250;
 pub(crate) const MAX_YIELD_TIME_MS: u64 = 30_000;
@@ -133,7 +133,7 @@ impl SessionStore {
     }
 }
 
-pub(crate) struct UnifiedExecSessionManager {
+pub struct UnifiedExecSessionManager {
     session_store: Mutex<SessionStore>,
 }
 
