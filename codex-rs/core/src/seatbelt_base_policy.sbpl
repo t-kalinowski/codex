@@ -37,6 +37,7 @@
   (sysctl-name "hw.l1icachesize_compat")
   (sysctl-name "hw.l2cachesize_compat")
   (sysctl-name "hw.l3cachesize_compat")
+  (sysctl-name "hw.logicalcpu")
   (sysctl-name "hw.logicalcpu_max")
   (sysctl-name "hw.machine")
   (sysctl-name "hw.memsize")
