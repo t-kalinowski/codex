@@ -56,7 +56,7 @@ pub enum SandboxPreference {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum SandboxTransformError {
+pub enum SandboxTransformError {
     #[error("missing codex-linux-sandbox executable path")]
     MissingLinuxSandboxExecutable,
     #[cfg(not(target_os = "macos"))]
@@ -93,7 +93,7 @@ impl SandboxManager {
         }
     }
 
-    pub(crate) fn transform(
+    pub fn transform(
         &self,
         mut spec: CommandSpec,
         policy: &SandboxPolicy,
