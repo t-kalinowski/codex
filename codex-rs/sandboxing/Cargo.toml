@@ -12,24 +12,46 @@ doctest = false
 [lints]
 workspace = true
 
+[features]
+default = ["full"]
+full = [
+    "seatbelt-profile",
+    "dep:anyhow",
+    "dep:codex-network-proxy",
+    "dep:codex-protocol",
+    "dep:codex-utils-absolute-path",
+    "dep:codex-utils-home-dir",
+    "dep:codex-utils-path-uri",
+    "dep:codex-utils-pty",
+    "dep:codex-windows-sandbox",
+    "dep:dunce",
+    "dep:libc",
+    "dep:regex-lite",
+    "dep:serde_json",
+    "dep:tracing",
+    "dep:url",
+    "dep:which",
+]
+seatbelt-profile = []
+
 [dependencies]
-anyhow = { workspace = true }
-codex-network-proxy = { workspace = true }
-codex-protocol = { workspace = true }
-codex-utils-absolute-path = { workspace = true }
-codex-utils-path-uri = { workspace = true }
-codex-utils-pty = { workspace = true }
-codex-windows-sandbox = { workspace = true }
-dunce = { workspace = true }
-libc = { workspace = true }
-serde_json = { workspace = true }
-regex-lite = { workspace = true }
-tracing = { workspace = true, features = ["log"] }
-url = { workspace = true }
-which = { workspace = true }
+anyhow = { workspace = true, optional = true }
+codex-network-proxy = { workspace = true, optional = true }
+codex-protocol = { workspace = true, optional = true }
+codex-utils-absolute-path = { workspace = true, optional = true }
+codex-utils-path-uri = { workspace = true, optional = true }
+codex-utils-pty = { workspace = true, optional = true }
+codex-windows-sandbox = { workspace = true, optional = true }
+dunce = { workspace = true, optional = true }
+libc = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+regex-lite = { workspace = true, optional = true }
+tracing = { workspace = true, features = ["log"], optional = true }
+url = { workspace = true, optional = true }
+which = { workspace = true, optional = true }
 
 [target.'cfg(windows)'.dependencies]
-codex-utils-home-dir = { workspace = true }
+codex-utils-home-dir = { workspace = true, optional = true }
 
 [dev-dependencies]
 anyhow = { workspace = true }
