@@ -1,4 +1,5 @@
 use super::CreateSeatbeltCommandArgsParams;
+use super::CreateSeatbeltCommandPrefixParams;
 use super::MACOS_PATH_TO_SEATBELT_EXECUTABLE;
 use super::MACOS_SEATBELT_BASE_POLICY;
 use super::ProxyPolicyInputs;
@@ -6,6 +7,7 @@ use super::UnixDomainSocketPolicy;
 use super::build_seatbelt_unreadable_glob_policy;
 use super::create_seatbelt_command_args;
 use super::create_seatbelt_command_args_for_legacy_policy;
+use super::create_seatbelt_command_prefix;
 use super::dynamic_network_policy;
 use super::normalize_path_for_sandbox;
 use super::seatbelt_regex_for_unreadable_glob;
@@ -31,7 +33,10 @@ use codex_protocol::permissions::PROTECTED_METADATA_PATH_NAMES;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use pretty_assertions::assert_eq;
+use std::ffi::OsString;
 use std::fs;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::ffi::OsStringExt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
@@ -79,6 +84,57 @@ fn seatbelt_protected_metadata_name_requirements(root: &Path) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+#[test]
+fn command_prefix_appends_caller_policy_and_preserves_non_utf8_paths() {
+    let cwd = TempDir::new().expect("temp cwd");
+    let writable_path = PathBuf::from(OsString::from_vec(
+        b"/private/tmp/codex-non-utf8-\xff".to_vec(),
+    ));
+    let writable_root = AbsolutePathBuf::from_absolute_path(&writable_path)
+        .expect("non-UTF-8 path should remain absolute");
+    let file_system_policy = FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry {
+        path: FileSystemPath::Path {
+            path: writable_root,
+        },
+        access: FileSystemAccessMode::Write,
+        missing_path_behavior: None,
+    }]);
+    let runtime_policy = r#"(allow sysctl-read (sysctl-name "kern.boottime"))"#;
+
+    let args = create_seatbelt_command_prefix(CreateSeatbeltCommandPrefixParams {
+        file_system_sandbox_policy: &file_system_policy,
+        network_sandbox_policy: NetworkSandboxPolicy::Restricted,
+        sandbox_policy_cwd: cwd.path(),
+        enforce_managed_network: false,
+        managed_network: None,
+        environment_id: None,
+        network: None,
+        extra_allow_unix_sockets: &[],
+        extra_policy_sections: &[runtime_policy],
+    })
+    .unwrap();
+
+    let policy_index = args
+        .iter()
+        .position(|arg| arg == "-p")
+        .expect("seatbelt args should include -p");
+    let policy = args[policy_index + 1]
+        .to_str()
+        .expect("policy text should be UTF-8");
+    assert!(
+        policy.ends_with(runtime_policy),
+        "runtime policy should be appended to the rendered profile:\n{policy}"
+    );
+    let definition = args
+        .iter()
+        .find(|arg| arg.as_bytes().starts_with(b"-DWRITABLE_ROOT_0="))
+        .expect("writable-root definition should be present");
+    let mut expected_definition = b"-DWRITABLE_ROOT_0=".to_vec();
+    expected_definition.extend(writable_path.as_os_str().as_bytes());
+    assert_eq!(definition.as_bytes(), expected_definition);
+    assert_eq!(args.last(), Some(&OsString::from("--")));
 }
 
 struct TestConfigReloader;
@@ -212,6 +268,7 @@ fn explicit_unreadable_paths_are_excluded_from_full_disk_read_and_write_access()
         environment_id: None,
         network: None,
         extra_allow_unix_sockets: &[],
+        extra_policy_sections: &[],
     })
     .unwrap();
 
@@ -282,6 +339,7 @@ fn prepared_managed_network_context_allows_only_its_proxy_ports() {
         environment_id: None,
         network: None,
         extra_allow_unix_sockets: &[],
+        extra_policy_sections: &[],
     })
     .unwrap();
 
@@ -320,6 +378,7 @@ fn explicit_unreadable_paths_are_excluded_from_readable_roots() {
         environment_id: None,
         network: None,
         extra_allow_unix_sockets: &[],
+        extra_policy_sections: &[],
     })
     .unwrap();
 
@@ -628,6 +687,7 @@ fn create_seatbelt_args_allowlists_explicit_unix_socket_paths_without_proxy() {
         environment_id: None,
         network: None,
         extra_allow_unix_sockets: &extra_allow_unix_sockets,
+        extra_policy_sections: &[],
     })
     .unwrap();
     let policy = seatbelt_policy_arg(&args);
@@ -689,6 +749,7 @@ async fn create_seatbelt_args_merges_proxy_and_explicit_unix_socket_paths() -> a
         environment_id: None,
         network: Some(&network_proxy),
         extra_allow_unix_sockets: &extra_allow_unix_sockets,
+        extra_policy_sections: &[],
     })
     .unwrap();
 
@@ -733,6 +794,7 @@ fn create_seatbelt_args_preserves_full_network_with_explicit_unix_socket_paths()
         environment_id: None,
         network: None,
         extra_allow_unix_sockets: &extra_allow_unix_sockets,
+        extra_policy_sections: &[],
     })
     .unwrap();
     let policy = seatbelt_policy_arg(&args);

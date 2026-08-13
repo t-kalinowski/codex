@@ -390,6 +390,7 @@ async fn run_command_under_sandbox(
                 environment_id: None,
                 network: network.as_ref(),
                 extra_allow_unix_sockets: allow_unix_sockets,
+                extra_policy_sections: &[],
             })
             .map_err(|err| anyhow::anyhow!(err))?;
             spawn_debug_sandbox_child(

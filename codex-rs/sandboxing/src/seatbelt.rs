@@ -13,6 +13,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::ffi::OsString;
 use std::path::Path;
 use std::path::PathBuf;
 use tracing::warn;
@@ -604,6 +605,7 @@ fn create_seatbelt_command_args_for_legacy_policy(
         environment_id: None,
         network,
         extra_allow_unix_sockets: &[],
+        extra_policy_sections: &[],
     })
 }
 
@@ -618,6 +620,20 @@ pub struct CreateSeatbeltCommandArgsParams<'a> {
     pub environment_id: Option<&'a str>,
     pub network: Option<&'a NetworkProxy>,
     pub extra_allow_unix_sockets: &'a [AbsolutePathBuf],
+    pub extra_policy_sections: &'a [&'a str],
+}
+
+#[derive(Debug)]
+pub struct CreateSeatbeltCommandPrefixParams<'a> {
+    pub file_system_sandbox_policy: &'a FileSystemSandboxPolicy,
+    pub network_sandbox_policy: NetworkSandboxPolicy,
+    pub sandbox_policy_cwd: &'a Path,
+    pub enforce_managed_network: bool,
+    pub managed_network: Option<&'a ManagedNetworkSandboxContext>,
+    pub environment_id: Option<&'a str>,
+    pub network: Option<&'a NetworkProxy>,
+    pub extra_allow_unix_sockets: &'a [AbsolutePathBuf],
+    pub extra_policy_sections: &'a [&'a str],
 }
 
 pub fn create_seatbelt_command_args(
@@ -633,6 +649,40 @@ pub fn create_seatbelt_command_args(
         environment_id,
         network,
         extra_allow_unix_sockets,
+        extra_policy_sections,
+    } = args;
+
+    let mut seatbelt_args = create_seatbelt_command_prefix(CreateSeatbeltCommandPrefixParams {
+        file_system_sandbox_policy,
+        network_sandbox_policy,
+        sandbox_policy_cwd,
+        enforce_managed_network,
+        managed_network,
+        environment_id,
+        network,
+        extra_allow_unix_sockets,
+        extra_policy_sections,
+    })?
+    .into_iter()
+    .map(|arg| arg.to_string_lossy().into_owned())
+    .collect::<Vec<_>>();
+    seatbelt_args.extend(command);
+    Ok(seatbelt_args)
+}
+
+pub fn create_seatbelt_command_prefix(
+    args: CreateSeatbeltCommandPrefixParams<'_>,
+) -> Result<Vec<OsString>, String> {
+    let CreateSeatbeltCommandPrefixParams {
+        file_system_sandbox_policy,
+        network_sandbox_policy,
+        sandbox_policy_cwd,
+        enforce_managed_network,
+        managed_network,
+        environment_id,
+        network,
+        extra_allow_unix_sockets,
+        extra_policy_sections,
     } = args;
 
     let unreadable_roots =
@@ -748,6 +798,11 @@ pub fn create_seatbelt_command_args(
     if include_platform_defaults {
         policy_sections.push(MACOS_RESTRICTED_READ_ONLY_PLATFORM_DEFAULTS.to_string());
     }
+    policy_sections.extend(
+        extra_policy_sections
+            .iter()
+            .map(|section| (*section).to_string()),
+    );
 
     let full_policy = policy_sections.join("\n");
 
@@ -758,15 +813,16 @@ pub fn create_seatbelt_command_args(
     ]
     .concat();
 
-    let mut seatbelt_args: Vec<String> = vec!["-p".to_string(), full_policy];
+    let mut seatbelt_args = vec![OsString::from("-p"), OsString::from(full_policy)];
     let definition_args = dir_params
         .into_iter()
         .map(|(key, value): (String, PathBuf)| {
-            format!("-D{key}={value}", value = value.to_string_lossy())
+            let mut definition = OsString::from(format!("-D{key}="));
+            definition.push(value);
+            definition
         });
     seatbelt_args.extend(definition_args);
-    seatbelt_args.push("--".to_string());
-    seatbelt_args.extend(command);
+    seatbelt_args.push(OsString::from("--"));
     Ok(seatbelt_args)
 }
 

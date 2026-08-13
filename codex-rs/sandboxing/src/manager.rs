@@ -363,6 +363,7 @@ impl SandboxManager {
                     environment_id,
                     network,
                     extra_allow_unix_sockets: &[],
+                    extra_policy_sections: &[],
                 })
                 .map_err(SandboxTransformError::EnvironmentNetworkProxy)?;
                 let mut full_command = Vec::with_capacity(1 + args.len());
