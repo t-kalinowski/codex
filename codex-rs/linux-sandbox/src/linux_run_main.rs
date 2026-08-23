@@ -23,6 +23,7 @@ use std::time::Duration;
 use crate::bwrap::BwrapNetworkMode;
 use crate::bwrap::BwrapOptions;
 use crate::bwrap::create_bwrap_command_args;
+use crate::embedding::EmbeddingOptions;
 use crate::landlock::apply_permission_profile_to_current_thread;
 use crate::launcher::exec_bwrap;
 use crate::launcher::preferred_bwrap_supports_argv0;
@@ -144,6 +145,9 @@ pub struct LandlockCommand {
     #[arg(long = "no-proc", default_value_t = false)]
     pub no_proc: bool,
 
+    #[command(flatten)]
+    pub embedding_options: EmbeddingOptions,
+
     /// Full command args to run under the Linux sandbox helper.
     #[arg(trailing_var_arg = true)]
     pub command: Vec<String>,
@@ -167,8 +171,11 @@ pub fn run_main() -> ! {
         proxy_route_spec,
         verify_fd_mounts,
         no_proc,
+        embedding_options,
         command,
     } = LandlockCommand::parse();
+
+    embedding_options.activate();
 
     if command.is_empty() {
         panic!("No command specified to execute.");
@@ -576,9 +583,15 @@ fn run_bwrap_in_child_with_synthetic_mount_cleanup(bwrap_args: crate::bwrap::Bwr
     let synthetic_mount_registrations = register_synthetic_mount_targets(&synthetic_mount_targets);
     let protected_create_registrations =
         register_protected_create_targets(&protected_create_targets);
-    let registry_root = synthetic_mount_registry_root()
-        .to_string_lossy()
-        .into_owned();
+    let registry_root = synthetic_mount_registry_root();
+    let registry_root = if crate::embedding::synthetic_mount_registry_root().is_some() {
+        registry_root
+            .to_str()
+            .expect("embedding registry root was validated as UTF-8")
+            .to_owned()
+    } else {
+        registry_root.to_string_lossy().into_owned()
+    };
     let Some(command_separator) = args.iter().position(|arg| arg == "--") else {
         panic!("bubblewrap argv is missing command separator '--'");
     };
@@ -1348,6 +1361,10 @@ fn synthetic_mount_marker_dir(path: &Path) -> PathBuf {
 }
 
 fn synthetic_mount_registry_root() -> PathBuf {
+    if let Some(registry_root) = crate::embedding::synthetic_mount_registry_root() {
+        return registry_root.to_path_buf();
+    }
+
     static REGISTRY_ROOT: OnceLock<PathBuf> = OnceLock::new();
 
     REGISTRY_ROOT

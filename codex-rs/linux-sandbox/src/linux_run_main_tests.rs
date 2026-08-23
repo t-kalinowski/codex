@@ -26,6 +26,54 @@ fn read_only_file_system_policy() -> FileSystemSandboxPolicy {
 }
 
 #[test]
+fn parses_the_embedding_launcher_mode_before_the_target_command() {
+    let command = LandlockCommand::try_parse_from([
+        "codex-linux-sandbox",
+        "--embedding",
+        "--embedding-bwrap",
+        "/usr/bin/bwrap",
+        "--embedding-bwrap-kind",
+        "system",
+        "--embedding-registry-root",
+        "/state/registry",
+        "--sandbox-policy-cwd",
+        "/",
+        "--",
+        "/bin/true",
+    ])
+    .expect("parse helper command");
+
+    assert!(command.embedding_options.embedding);
+    assert_eq!(
+        command.embedding_options.embedding_bwrap,
+        Some(PathBuf::from("/usr/bin/bwrap"))
+    );
+    assert_eq!(
+        command.embedding_options.embedding_bwrap_kind,
+        Some(crate::embedding::EmbeddingBwrapKind::System)
+    );
+    assert_eq!(
+        command.embedding_options.embedding_registry_root,
+        Some(PathBuf::from("/state/registry"))
+    );
+    assert_eq!(command.command, ["/bin/true"]);
+}
+
+#[test]
+fn embedding_mode_requires_a_pinned_bubblewrap_launcher() {
+    let result = LandlockCommand::try_parse_from([
+        "codex-linux-sandbox",
+        "--embedding",
+        "--sandbox-policy-cwd",
+        "/",
+        "--",
+        "/bin/true",
+    ]);
+
+    assert!(result.is_err());
+}
+
+#[test]
 fn detects_proc_mount_invalid_argument_failure() {
     let stderr = "bwrap: Can't mount proc on /newroot/proc: Invalid argument";
     assert!(is_proc_mount_failure(stderr));

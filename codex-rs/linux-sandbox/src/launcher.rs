@@ -15,15 +15,15 @@ use codex_sandboxing::find_system_bwrap_in_path;
 use codex_utils_absolute_path::AbsolutePathBuf;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum BubblewrapLauncher {
+pub(crate) enum BubblewrapLauncher {
     System(SystemBwrapLauncher),
     Bundled(BundledBwrapLauncher),
     Unavailable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct SystemBwrapLauncher {
-    program: AbsolutePathBuf,
+pub(crate) struct SystemBwrapLauncher {
+    pub(crate) program: AbsolutePathBuf,
     supports_argv0: bool,
     supports_ro_bind_fd: bool,
 }
@@ -124,6 +124,10 @@ fn translate_legacy_bwrap_fd_mounts(argv: &mut Vec<String>) -> Result<(), String
 }
 
 fn preferred_bwrap_launcher() -> BubblewrapLauncher {
+    if let Some(launcher) = crate::embedding::selected_bwrap_launcher() {
+        return launcher;
+    }
+
     static LAUNCHER: OnceLock<BubblewrapLauncher> = OnceLock::new();
     LAUNCHER
         .get_or_init(|| {
@@ -141,7 +145,9 @@ fn preferred_bwrap_launcher() -> BubblewrapLauncher {
         .clone()
 }
 
-fn system_bwrap_launcher_for_path(system_bwrap_path: &Path) -> Option<SystemBwrapLauncher> {
+pub(crate) fn system_bwrap_launcher_for_path(
+    system_bwrap_path: &Path,
+) -> Option<SystemBwrapLauncher> {
     system_bwrap_launcher_for_path_with_probe(system_bwrap_path, system_bwrap_capabilities)
 }
 

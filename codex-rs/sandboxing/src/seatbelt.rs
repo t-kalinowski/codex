@@ -55,6 +55,28 @@ impl std::fmt::Display for SeatbeltPreparationError {
 /// already has root access.
 pub const MACOS_PATH_TO_SEATBELT_EXECUTABLE: &str = "/usr/bin/sandbox-exec";
 
+/// Returns whether the restricted platform defaults grant writes at or below
+/// `path`, or at a writable descendant of `path`.
+///
+/// Embedding adapters use this to reject read-only requests that a later
+/// platform-default allowance would reopen.
+pub fn restricted_platform_defaults_overlap_writes(path: &Path) -> bool {
+    const WRITABLE_ROOTS: &[&str] = &[
+        "/tmp",
+        "/private/tmp",
+        "/var/tmp",
+        "/private/var/tmp",
+        "/dev",
+    ];
+    let normalized = normalize_path_for_sandbox(path)
+        .map(AbsolutePathBuf::into_path_buf)
+        .unwrap_or_else(|| path.to_path_buf());
+    WRITABLE_ROOTS.iter().any(|root| {
+        let root = Path::new(root);
+        normalized.starts_with(root) || root.starts_with(&normalized)
+    })
+}
+
 fn is_loopback_host(host: &str) -> bool {
     host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1"
 }

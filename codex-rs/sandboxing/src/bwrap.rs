@@ -1,5 +1,6 @@
 use crate::policy_transforms::should_require_platform_sandbox;
 use codex_protocol::models::PermissionProfile;
+use std::ffi::OsStr;
 use std::io::ErrorKind;
 use std::io::Read;
 use std::os::fd::AsRawFd;
@@ -72,21 +73,55 @@ fn system_bwrap_warning_for_path(system_bwrap_path: Option<&Path>) -> Option<Str
 }
 
 fn system_bwrap_has_user_namespace_access(system_bwrap_path: &Path, timeout: Duration) -> bool {
-    let mut child = match Command::new(system_bwrap_path)
-        .args([
-            "--unshare-user",
-            "--unshare-net",
-            "--ro-bind",
-            "/",
-            "/",
-            "/bin/true",
-        ])
+    !matches!(
+        namespace_probe(
+            system_bwrap_path,
+            timeout,
+            /*require_network_namespace*/ true,
+        ),
+        UserNamespaceProbeResult::KnownFailure
+    )
+}
+
+/// Returns whether bubblewrap can successfully enter the namespaces needed by
+/// the requested Linux sandbox network mode.
+pub fn bwrap_has_namespace_access(bwrap_path: &Path, require_network_namespace: bool) -> bool {
+    matches!(
+        namespace_probe(
+            bwrap_path,
+            SYSTEM_BWRAP_PROBE_TIMEOUT,
+            require_network_namespace,
+        ),
+        UserNamespaceProbeResult::Success
+    )
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum UserNamespaceProbeResult {
+    Success,
+    KnownFailure,
+    OtherFailure,
+    Indeterminate,
+}
+
+fn namespace_probe(
+    bwrap_path: &Path,
+    timeout: Duration,
+    require_network_namespace: bool,
+) -> UserNamespaceProbeResult {
+    let mut args = vec!["--unshare-user"];
+    if require_network_namespace {
+        args.push("--unshare-net");
+    }
+    args.extend(["--ro-bind", "/", "/", "/bin/true"]);
+    let mut child = match Command::new(bwrap_path)
+        .args(args)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
     {
         Ok(child) => child,
-        Err(_) => return true,
+        Err(_) => return UserNamespaceProbeResult::Indeterminate,
     };
 
     let deadline = Instant::now() + timeout;
@@ -116,20 +151,26 @@ fn system_bwrap_has_user_namespace_access(system_bwrap_path: &Path, timeout: Dur
                     stdout: Vec::new(),
                     stderr,
                 };
-                return output.status.success() || !is_user_namespace_failure(&output);
+                if output.status.success() {
+                    return UserNamespaceProbeResult::Success;
+                }
+                if is_user_namespace_failure(&output) {
+                    return UserNamespaceProbeResult::KnownFailure;
+                }
+                return UserNamespaceProbeResult::OtherFailure;
             }
             Ok(None) => {
                 if Instant::now() >= deadline {
                     let _ = child.kill();
                     let _ = child.wait();
-                    return true;
+                    return UserNamespaceProbeResult::Indeterminate;
                 }
                 thread::sleep(SYSTEM_BWRAP_PROBE_POLL_INTERVAL);
             }
             Err(_) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return true;
+                return UserNamespaceProbeResult::Indeterminate;
             }
         }
     }
@@ -168,7 +209,16 @@ fn is_user_namespace_failure(output: &Output) -> bool {
 pub fn find_system_bwrap_in_path() -> Option<PathBuf> {
     let search_path = std::env::var_os("PATH")?;
     let cwd = std::env::current_dir().ok()?;
-    find_system_bwrap_in_search_paths(std::env::split_paths(&search_path), &cwd)
+    find_system_bwrap_in_search_path(Some(&search_path), &cwd)
+}
+
+/// Finds a trusted system bubblewrap using only the caller-provided search
+/// path, excluding executables located below `cwd`.
+pub fn find_system_bwrap_in_search_path(
+    search_path: Option<&OsStr>,
+    cwd: &Path,
+) -> Option<PathBuf> {
+    find_system_bwrap_in_search_paths(std::env::split_paths(search_path?), cwd)
 }
 
 fn find_system_bwrap_in_search_paths(

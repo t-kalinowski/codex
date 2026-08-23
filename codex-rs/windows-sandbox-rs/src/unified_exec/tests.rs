@@ -1,5 +1,8 @@
 #![cfg(target_os = "windows")]
 
+#[path = "embedding_tests.rs"]
+mod embedding_tests;
+
 use super::WindowsSandboxSessionRequest;
 use super::spawn_windows_sandbox_session_elevated_for_permission_profile;
 use super::spawn_windows_sandbox_session_for_level;

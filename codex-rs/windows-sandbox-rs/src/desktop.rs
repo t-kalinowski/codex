@@ -76,6 +76,15 @@ impl LaunchDesktop {
         }
     }
 
+    pub(crate) fn prepare_for_embedding(access_sids: &[*mut c_void]) -> Result<Self> {
+        let private_desktop = PrivateDesktop::create_with_access_sids(None, access_sids)?;
+        let startup_name = to_wide(format!("Winsta0\\{}", private_desktop.name));
+        Ok(Self {
+            _private_desktop: Some(private_desktop),
+            startup_name,
+        })
+    }
+
     pub fn startup_info_desktop(&self) -> *mut u16 {
         self.startup_name.as_ptr() as *mut u16
     }
@@ -88,6 +97,13 @@ struct PrivateDesktop {
 
 impl PrivateDesktop {
     fn create(logs_base_dir: Option<&Path>) -> Result<Self> {
+        Self::create_with_access_sids(logs_base_dir, &[])
+    }
+
+    fn create_with_access_sids(
+        logs_base_dir: Option<&Path>,
+        additional_access_sids: &[*mut c_void],
+    ) -> Result<Self> {
         let mut rng = SmallRng::from_entropy();
         let name = format!("CodexSandboxDesktop-{:x}", rng.r#gen::<u128>());
         let name_wide = to_wide(&name);
@@ -115,7 +131,7 @@ impl PrivateDesktop {
         }
 
         unsafe {
-            if let Err(err) = grant_desktop_access(handle, logs_base_dir) {
+            if let Err(err) = grant_desktop_access(handle, additional_access_sids, logs_base_dir) {
                 let _ = CloseDesktop(handle);
                 return Err(err);
             }
@@ -125,23 +141,33 @@ impl PrivateDesktop {
     }
 }
 
-unsafe fn grant_desktop_access(handle: isize, logs_base_dir: Option<&Path>) -> Result<()> {
+unsafe fn grant_desktop_access(
+    handle: isize,
+    additional_access_sids: &[*mut c_void],
+    logs_base_dir: Option<&Path>,
+) -> Result<()> {
     let token = get_current_token_for_restriction()?;
     let mut logon_sid = get_logon_sid_bytes(token)?;
     CloseHandle(token);
 
-    let entries = [EXPLICIT_ACCESS_W {
-        grfAccessPermissions: DESKTOP_ALL_ACCESS,
-        grfAccessMode: GRANT_ACCESS,
-        grfInheritance: 0,
-        Trustee: TRUSTEE_W {
-            pMultipleTrustee: ptr::null_mut(),
-            MultipleTrusteeOperation: 0,
-            TrusteeForm: TRUSTEE_IS_SID,
-            TrusteeType: TRUSTEE_IS_UNKNOWN,
-            ptstrName: logon_sid.as_mut_ptr() as *mut c_void as *mut u16,
-        },
-    }];
+    let mut access_sids = Vec::with_capacity(additional_access_sids.len() + 1);
+    access_sids.push(logon_sid.as_mut_ptr() as *mut c_void);
+    access_sids.extend_from_slice(additional_access_sids);
+    let entries = access_sids
+        .iter()
+        .map(|sid| EXPLICIT_ACCESS_W {
+            grfAccessPermissions: DESKTOP_ALL_ACCESS,
+            grfAccessMode: GRANT_ACCESS,
+            grfInheritance: 0,
+            Trustee: TRUSTEE_W {
+                pMultipleTrustee: ptr::null_mut(),
+                MultipleTrusteeOperation: 0,
+                TrusteeForm: TRUSTEE_IS_SID,
+                TrusteeType: TRUSTEE_IS_UNKNOWN,
+                ptstrName: *sid as *mut u16,
+            },
+        })
+        .collect::<Vec<_>>();
 
     let mut updated_dacl = ptr::null_mut();
     let set_entries_code = SetEntriesInAclW(

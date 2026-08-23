@@ -63,6 +63,12 @@ mod desktop;
 #[cfg(target_os = "windows")]
 mod dpapi;
 #[cfg(target_os = "windows")]
+mod embedding_acl;
+#[cfg(target_os = "windows")]
+mod embedding_acl_mutex;
+#[cfg(target_os = "windows")]
+mod embedding_token;
+#[cfg(target_os = "windows")]
 mod env;
 #[cfg(target_os = "windows")]
 mod helper_materialization;
@@ -318,9 +324,17 @@ pub use token::create_workspace_write_token_with_caps_from;
 #[cfg(target_os = "windows")]
 pub use token::get_current_token_for_restriction;
 #[cfg(target_os = "windows")]
+pub use unified_exec::WindowsSandboxEmbeddingProcess;
+#[cfg(target_os = "windows")]
+pub use unified_exec::WindowsSandboxEmbeddingProcessHandle;
+#[cfg(target_os = "windows")]
+pub use unified_exec::WindowsSandboxEmbeddingRequest;
+#[cfg(target_os = "windows")]
 pub use unified_exec::WindowsSandboxSessionRequest;
 #[cfg(target_os = "windows")]
 pub use unified_exec::spawn_windows_sandbox_session_elevated_for_permission_profile;
+#[cfg(target_os = "windows")]
+pub use unified_exec::spawn_windows_sandbox_session_for_embedding;
 #[cfg(target_os = "windows")]
 pub use unified_exec::spawn_windows_sandbox_session_for_level;
 #[cfg(target_os = "windows")]

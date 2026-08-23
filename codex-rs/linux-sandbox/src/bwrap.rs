@@ -361,6 +361,16 @@ fn create_bwrap_flags(
     })
 }
 
+/// Returns whether a read-only rule overlaps bubblewrap's implicit writable `/dev` tree.
+///
+/// Overlap in either direction is rejected conservatively because bubblewrap
+/// mounts `/dev` after a broad read-only root and may layer narrower mounts
+/// below it.
+pub fn read_rule_overlaps_implicit_writable_dev(path: &Path) -> bool {
+    let implicit_writable_root = Path::new("/dev");
+    path.starts_with(implicit_writable_root) || implicit_writable_root.starts_with(path)
+}
+
 /// Build the bubblewrap filesystem mounts for a given filesystem policy.
 ///
 /// The mount order is important:
@@ -1006,7 +1016,7 @@ fn append_read_only_subpath_args(
     subpath: &Path,
     allowed_write_paths: &[PathBuf],
 ) -> Result<()> {
-    if let Some(symlink) = first_writable_symlink_component_in_path(subpath, allowed_write_paths) {
+    if let Some(symlink) = first_writable_symlink_component(subpath, allowed_write_paths) {
         /*
          * A read-only carveout under a writable symlink cannot be made reliable
          * with bwrap path arguments. Binding the symlink's current target would
@@ -1124,9 +1134,7 @@ fn append_unreadable_root_args(
     unreadable_root: &Path,
     allowed_write_paths: &[PathBuf],
 ) -> Result<()> {
-    if let Some(symlink) =
-        first_writable_symlink_component_in_path(unreadable_root, allowed_write_paths)
-    {
+    if let Some(symlink) = first_writable_symlink_component(unreadable_root, allowed_write_paths) {
         /*
          * Deny-read masks must fail closed when the protected path crosses a
          * symlink that remains writable to the sandboxed process. Resolving and
@@ -1204,6 +1212,18 @@ fn is_within_allowed_write_paths(path: &Path, allowed_write_paths: &[PathBuf]) -
         .any(|root| path.starts_with(root))
 }
 
+/// Returns the first symlink component whose inode remains under a writable root.
+///
+/// Embedders use this before spawning the helper so a policy that bubblewrap
+/// cannot apply without a path race is rejected before the target process can
+/// start.
+pub fn first_writable_symlink_component_in_path(
+    target_path: &Path,
+    allowed_write_paths: &[PathBuf],
+) -> Option<PathBuf> {
+    first_writable_symlink_component(target_path, allowed_write_paths)
+}
+
 enum EmptyProtectedMetadataPath {
     File(Metadata),
     Directory(Metadata),
@@ -1233,7 +1253,7 @@ fn directory_is_empty(path: &Path) -> bool {
     entries.next().is_none()
 }
 
-fn first_writable_symlink_component_in_path(
+fn first_writable_symlink_component(
     target_path: &Path,
     allowed_write_paths: &[PathBuf],
 ) -> Option<PathBuf> {
@@ -1325,6 +1345,16 @@ mod tests {
     #[test]
     fn default_unreadable_glob_scan_has_no_depth_cap() {
         assert_eq!(BwrapOptions::default().glob_scan_max_depth, None);
+    }
+
+    #[test]
+    fn detects_read_rules_that_overlap_the_implicit_writable_dev_tree() {
+        for path in ["/", "/dev", "/dev/null", "/dev/shm/nested"] {
+            assert!(read_rule_overlaps_implicit_writable_dev(Path::new(path)));
+        }
+        for path in ["/usr", "/device", "/tmp"] {
+            assert!(!read_rule_overlaps_implicit_writable_dev(Path::new(path)));
+        }
     }
 
     fn unreadable_glob_entry(pattern: String) -> FileSystemSandboxEntry {

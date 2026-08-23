@@ -10,6 +10,8 @@ mod bundled_bwrap;
 #[cfg(target_os = "linux")]
 mod bwrap;
 #[cfg(target_os = "linux")]
+mod embedding;
+#[cfg(target_os = "linux")]
 mod exec_util;
 #[cfg(target_os = "linux")]
 mod fd_mount;
@@ -32,6 +34,17 @@ pub const BUNDLED_BWRAP_DIGEST_VERIFICATION_FAILURE_EXIT_CODE: i32 = 8;
 pub fn run_main() -> ! {
     linux_run_main::run_main();
 }
+
+#[cfg(target_os = "linux")]
+pub use bwrap::first_writable_symlink_component_in_path;
+#[cfg(target_os = "linux")]
+pub use bwrap::read_rule_overlaps_implicit_writable_dev;
+#[cfg(target_os = "linux")]
+pub use embedding::EmbeddingBwrapKind;
+#[cfg(target_os = "linux")]
+pub use embedding::EmbeddingBwrapLauncher;
+#[cfg(target_os = "linux")]
+pub use embedding::prepare_embedding_bwrap;
 
 #[cfg(not(target_os = "linux"))]
 pub fn run_main() -> ! {

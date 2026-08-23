@@ -53,7 +53,7 @@ struct TokenDefaultDaclInfo {
 
 /// Sets a permissive default DACL so sandboxed processes can create pipes/IPC objects
 /// without hitting ACCESS_DENIED when PowerShell builds pipelines.
-unsafe fn set_default_dacl(h_token: HANDLE, sids: &[*mut c_void]) -> Result<()> {
+pub(crate) unsafe fn set_default_dacl(h_token: HANDLE, sids: &[*mut c_void]) -> Result<()> {
     if sids.is_empty() {
         return Ok(());
     }
@@ -316,7 +316,7 @@ unsafe fn get_user_sid_bytes(h_token: HANDLE) -> Result<Vec<u8>> {
     Ok(user_sid_bytes)
 }
 
-unsafe fn enable_single_privilege(h_token: HANDLE, name: &str) -> Result<()> {
+pub(crate) unsafe fn enable_single_privilege(h_token: HANDLE, name: &str) -> Result<()> {
     let mut luid = LUID {
         LowPart: 0,
         HighPart: 0,

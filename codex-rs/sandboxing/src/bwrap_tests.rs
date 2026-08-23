@@ -84,6 +84,41 @@ exit 1
 }
 
 #[test]
+fn strict_user_namespace_probe_requires_a_successful_noop() {
+    let successful_bwrap = write_fake_bwrap("#!/bin/sh\nexit 0\n");
+    let unrelated_failure = write_fake_bwrap("#!/bin/sh\nexit 7\n");
+
+    assert!(bwrap_has_namespace_access(
+        &successful_bwrap,
+        /*require_network_namespace*/ true,
+    ));
+    assert!(!bwrap_has_namespace_access(
+        &unrelated_failure,
+        /*require_network_namespace*/ false,
+    ));
+    assert!(!bwrap_has_namespace_access(
+        Path::new("/definitely/not/a/bwrap"),
+        /*require_network_namespace*/ false,
+    ));
+}
+
+#[test]
+fn strict_namespace_probe_only_requires_network_when_requested() {
+    let fake_bwrap = write_fake_bwrap(
+        "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = \"--unshare-net\" ]; then\n    exit 7\n  fi\ndone\nexit 0\n",
+    );
+
+    assert!(bwrap_has_namespace_access(
+        &fake_bwrap,
+        /*require_network_namespace*/ false,
+    ));
+    assert!(!bwrap_has_namespace_access(
+        &fake_bwrap,
+        /*require_network_namespace*/ true,
+    ));
+}
+
+#[test]
 fn detects_wsl1_proc_version_formats() {
     assert!(proc_version_indicates_wsl1(
         "Linux version 4.4.0-22621-Microsoft"
@@ -127,7 +162,7 @@ fn finds_first_executable_bwrap_in_joined_search_path() {
     let search_path = std::env::join_paths([first_dir, second_dir]).expect("join search path");
 
     assert_eq!(
-        find_system_bwrap_in_search_paths(std::env::split_paths(&search_path), &cwd),
+        find_system_bwrap_in_search_path(Some(&search_path), &cwd),
         Some(expected_bwrap)
     );
 }

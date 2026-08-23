@@ -3,11 +3,14 @@
 //! This module is the thin orchestration layer for Windows unified-exec sessions.
 //! Backend-specific mechanics live in sibling modules:
 //! - `backends::legacy` adapts the direct restricted-token spawn path into a live session.
+//! - `backends::embedding` adapts the restricted-token path for external applications.
 //! - `backends::elevated` adapts the elevated command-runner IPC path into the same session API.
 //! - `backends::windows_common` holds the small shared Windows backend helpers
 //!   used by both.
 
 mod backends;
+mod embedding_process;
+mod embedding_spawn;
 
 use anyhow::Result;
 use anyhow::bail;
@@ -18,6 +21,9 @@ use codex_utils_pty::SpawnedProcess;
 use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
+
+pub use embedding_process::WindowsSandboxEmbeddingProcess;
+pub use embedding_process::WindowsSandboxEmbeddingProcessHandle;
 
 /// Fully resolved Windows sandbox session launch request.
 ///
@@ -43,6 +49,43 @@ pub struct WindowsSandboxSessionRequest<'a> {
     pub tty: bool,
     pub stdin_open: bool,
     pub use_private_desktop: bool,
+}
+
+/// Restricted-token launch request for an embedding application.
+///
+/// Unlike Codex's session launch path, this request preserves `env_map` exactly,
+/// treats filesystem ACL preparation errors as fatal, and does not add implicit
+/// deny-write rules for `.codex` or `.agents` under `cwd`.
+pub struct WindowsSandboxEmbeddingRequest<'a> {
+    pub permission_profile: &'a PermissionProfile,
+    /// Application-owned directory for per-process capability state.
+    pub state_dir: &'a AbsolutePathBuf,
+    pub command: Vec<String>,
+    pub cwd: &'a AbsolutePathBuf,
+    /// Complete environment for the child process.
+    pub env_map: HashMap<String, String>,
+    pub additional_deny_write_paths: &'a [AbsolutePathBuf],
+    pub stdin_open: bool,
+}
+
+/// Launches a non-TTY restricted-token session for an embedding application.
+///
+/// This path always uses a private desktop. It rejects network-restricted
+/// permission profiles because the unelevated backend cannot enforce direct
+/// network denial.
+pub async fn spawn_windows_sandbox_session_for_embedding(
+    request: WindowsSandboxEmbeddingRequest<'_>,
+) -> Result<WindowsSandboxEmbeddingProcess> {
+    backends::embedding::spawn_windows_sandbox_session_for_embedding(
+        request.permission_profile,
+        request.state_dir,
+        request.command,
+        request.cwd,
+        request.env_map,
+        request.additional_deny_write_paths,
+        request.stdin_open,
+    )
+    .await
 }
 
 pub async fn spawn_windows_sandbox_session_for_level(

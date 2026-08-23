@@ -11,7 +11,11 @@ mod violation;
 mod windows;
 
 #[cfg(target_os = "linux")]
+pub use bwrap::bwrap_has_namespace_access;
+#[cfg(target_os = "linux")]
 pub use bwrap::find_system_bwrap_in_path;
+#[cfg(target_os = "linux")]
+pub use bwrap::find_system_bwrap_in_search_path;
 #[cfg(target_os = "linux")]
 pub use bwrap::system_bwrap_warning;
 pub use codex_windows_sandbox::WindowsSandboxProxySettingsMode;

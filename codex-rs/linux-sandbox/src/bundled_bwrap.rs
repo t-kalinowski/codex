@@ -32,7 +32,31 @@ pub(crate) fn launcher() -> Option<BundledBwrapLauncher> {
         .map(|program| BundledBwrapLauncher { program })
 }
 
+pub(crate) fn launcher_for_executable(executable: &Path) -> Option<BundledBwrapLauncher> {
+    let executable = std::fs::canonicalize(executable).ok()?;
+    find_legacy_for_exe(&executable).map(|program| BundledBwrapLauncher { program })
+}
+
+pub(crate) fn launcher_for_program(program: &Path) -> Option<BundledBwrapLauncher> {
+    if !is_executable_file(program) {
+        return None;
+    }
+    AbsolutePathBuf::from_absolute_path(program)
+        .ok()
+        .map(|program| BundledBwrapLauncher { program })
+}
+
 impl BundledBwrapLauncher {
+    pub(crate) fn program(&self) -> &Path {
+        self.program.as_path()
+    }
+
+    pub(crate) fn has_valid_digest(&self) -> bool {
+        File::open(self.program.as_path()).is_ok_and(|file| {
+            verify_digest(&file, expected_sha256(), self.program.as_path()).is_ok()
+        })
+    }
+
     pub(crate) fn exec(&self, argv: Vec<String>, preserved_files: Vec<File>) -> ! {
         let bwrap_file = File::open(self.program.as_path()).unwrap_or_else(|err| {
             panic!(
@@ -267,6 +291,26 @@ mod tests {
         assert_eq!(
             find_legacy_for_exe(&exe),
             Some(AbsolutePathBuf::from_absolute_path(&expected_bwrap).expect("absolute"))
+        );
+    }
+
+    #[test]
+    fn finds_bundled_bwrap_relative_to_symlink_target() {
+        let temp_dir = tempdir().expect("temp dir");
+        let actual_exe = temp_dir.path().join("package").join("codex");
+        let helper_alias = temp_dir.path().join("runtime").join("codex-linux-sandbox");
+        let expected_bwrap = actual_exe.parent().expect("exe parent").join("bwrap");
+        write_executable(&actual_exe);
+        write_executable(&expected_bwrap);
+        fs::create_dir_all(helper_alias.parent().expect("alias parent"))
+            .expect("create alias parent");
+        std::os::unix::fs::symlink(&actual_exe, &helper_alias).expect("create helper alias");
+
+        assert_eq!(
+            launcher_for_executable(&helper_alias),
+            Some(BundledBwrapLauncher {
+                program: AbsolutePathBuf::from_absolute_path(&expected_bwrap).expect("absolute"),
+            })
         );
     }
 

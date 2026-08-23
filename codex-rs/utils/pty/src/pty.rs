@@ -470,20 +470,10 @@ fn set_cloexec(fd: RawFd) -> std::io::Result<()> {
 // macOS needs a fork-safe sweep because recvmsg cannot set close-on-exec.
 #[cfg(target_os = "macos")]
 pub fn close_inherited_fds_except(preserved_fds: &[RawFd]) {
-    let mut descriptors = [libc::proc_fdinfo {
-        proc_fd: 0,
-        proc_fdtype: 0,
-    }; 1024];
-    // SAFETY: proc_pidinfo writes descriptor records into the stack buffer.
-    let bytes = unsafe {
-        libc::proc_pidinfo(
-            libc::getpid(),
-            libc::PROC_PIDLISTFDS,
-            /*arg*/ 0,
-            descriptors.as_mut_ptr().cast(),
-            std::mem::size_of_val(&descriptors) as libc::c_int,
-        )
-    };
+    if close_inherited_fds_except_checked(preserved_fds).is_ok() {
+        return;
+    }
+
     let close_inheritable = |fd| {
         if fd <= libc::STDERR_FILENO || preserved_fds.contains(&fd) {
             return;
@@ -497,13 +487,6 @@ pub fn close_inherited_fds_except(preserved_fds: &[RawFd]) {
             }
         }
     };
-    if bytes > 0 && (bytes as usize) < std::mem::size_of_val(&descriptors) {
-        let count = bytes as usize / std::mem::size_of::<libc::proc_fdinfo>();
-        for descriptor in descriptors.iter().take(count) {
-            close_inheritable(descriptor.proc_fd);
-        }
-        return;
-    }
 
     // SAFETY: proc_pidinfo accepts a null buffer when its size is zero.
     let descriptor_table_bytes = unsafe {
@@ -535,6 +518,57 @@ pub fn close_inherited_fds_except(preserved_fds: &[RawFd]) {
             close_inheritable(fd);
         }
     }
+}
+
+/// Closes every inherited nonstandard descriptor or returns an error when the
+/// fixed fork-safe descriptor enumeration is incomplete.
+#[cfg(target_os = "macos")]
+pub fn close_inherited_fds_except_checked(preserved_fds: &[RawFd]) -> std::io::Result<()> {
+    let mut descriptors = [libc::proc_fdinfo {
+        proc_fd: 0,
+        proc_fdtype: 0,
+    }; 1024];
+    // SAFETY: proc_pidinfo writes descriptor records into the stack buffer.
+    let bytes = unsafe {
+        libc::proc_pidinfo(
+            libc::getpid(),
+            libc::PROC_PIDLISTFDS,
+            /*arg*/ 0,
+            descriptors.as_mut_ptr().cast(),
+            std::mem::size_of_val(&descriptors) as libc::c_int,
+        )
+    };
+    if bytes <= 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if bytes as usize >= std::mem::size_of_val(&descriptors) {
+        return Err(std::io::Error::other(
+            "inherited file descriptor enumeration was incomplete",
+        ));
+    }
+
+    let close_inheritable = |fd| -> std::io::Result<()> {
+        if fd <= libc::STDERR_FILENO || preserved_fds.contains(&fd) {
+            return Ok(());
+        }
+        // std::process keeps a CLOEXEC pipe open until exec to report spawn errors.
+        // SAFETY: fcntl and close only operate on a descriptor owned by this process.
+        unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFD);
+            if flags == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if flags & libc::FD_CLOEXEC == 0 && libc::close(fd) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+        Ok(())
+    };
+    let count = bytes as usize / std::mem::size_of::<libc::proc_fdinfo>();
+    for descriptor in descriptors.iter().take(count) {
+        close_inheritable(descriptor.proc_fd)?;
+    }
+    Ok(())
 }
 
 // Other Unix platforms keep their existing fd cleanup.
