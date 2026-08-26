@@ -19,6 +19,25 @@ use std::io;
 
 use tokio::process::Child;
 
+#[cfg(target_os = "macos")]
+mod macos;
+
+#[cfg(target_os = "macos")]
+pub use macos::ProcessExitStatus;
+#[cfg(target_os = "macos")]
+pub use macos::kill_process_group_members_except;
+#[cfg(target_os = "macos")]
+pub use macos::kill_process_group_until_quiescent;
+#[cfg(target_os = "macos")]
+pub use macos::try_process_exit_without_reaping;
+#[cfg(target_os = "macos")]
+pub use macos::wait_for_process_exit_without_reaping;
+
+#[cfg(all(test, target_os = "macos"))]
+use macos::kill_process_group_until_quiescent_with;
+#[cfg(all(test, target_os = "macos"))]
+use macos::process_is_live_group_member;
+
 #[cfg(target_os = "linux")]
 /// Ensure the child receives SIGTERM when the original parent dies.
 ///
@@ -267,7 +286,7 @@ pub fn kill_process_group(process_group_id: u32) -> io::Result<()> {
 }
 
 #[cfg(target_os = "macos")]
-/// Retry a denied SIGKILL against the exact group's individual members.
+/// Kill a process group, with exact-member fallback when `killpg` is denied.
 pub fn kill_process_group_with_member_fallback(process_group_id: u32) -> io::Result<()> {
     signal_process_group_with_member_fallback(
         process_group_id,
