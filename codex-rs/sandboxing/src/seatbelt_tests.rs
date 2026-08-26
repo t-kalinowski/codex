@@ -3,12 +3,14 @@ use super::GlobMatch;
 use super::MACOS_PATH_TO_SEATBELT_EXECUTABLE;
 use super::MACOS_SEATBELT_BASE_POLICY;
 use super::MacosSeatbeltProfile;
+use super::MacosTerminalPolicy;
 use super::ProxyPolicyInputs;
 use super::UnixDomainSocketPolicy;
 use super::build_seatbelt_unreadable_glob_policy;
 use super::create_seatbelt_command_args;
 use super::create_seatbelt_command_args_for_legacy_policy;
 use super::create_seatbelt_command_args_with_profile;
+use super::create_seatbelt_command_args_with_terminal_policy;
 use super::dynamic_network_policy;
 use super::normalize_path_for_sandbox;
 use super::seatbelt_regex_for_glob;
@@ -134,6 +136,77 @@ fn base_policy_allows_node_cpu_sysctls() {
         MACOS_SEATBELT_BASE_POLICY.contains("(sysctl-name \"hw.model\")"),
         "base policy must allow hardware model lookup for os.cpus()"
     );
+}
+
+#[test]
+fn base_policy_allows_sysctl_cli_queries_and_process_boot_time() {
+    for permission in [
+        r#"(sysctl-name "kern.boottime")"#,
+        r#"(sysctl-name-prefix "sysctl.name.")"#,
+        r#"(sysctl-name-prefix "sysctl.oidfmt.")"#,
+    ] {
+        assert!(
+            MACOS_SEATBELT_BASE_POLICY.contains(permission),
+            "base policy should contain {permission}"
+        );
+    }
+}
+
+#[test]
+fn terminal_policy_is_opt_in_and_ordered_after_broad_read_access() {
+    const DENY_PREEXISTING_TERMINALS: &str = r##"(deny file-read* file-write*
+  (literal "/dev/tty")
+  (regex #"^/dev/ttys[^/]*$"))"##;
+    const ALLOW_SANDBOX_CREATED_TERMINALS: &str = r##"(allow file-read* file-write*
+  (require-all
+    (regex #"^/dev/ttys[^/]*$")
+    (extension "com.apple.sandbox.pty")))"##;
+
+    let file_system_policy =
+        FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry::new(
+            FileSystemPath::Special {
+                value: FileSystemSpecialPath::Root,
+            },
+            FileSystemAccessMode::Read,
+        )]);
+    let params = || CreateSeatbeltCommandArgsParams {
+        command: vec!["/bin/true".to_string()],
+        file_system_sandbox_policy: &file_system_policy,
+        network_sandbox_policy: NetworkSandboxPolicy::Restricted,
+        sandbox_policy_cwd: Path::new("/"),
+        enforce_managed_network: false,
+        managed_network: None,
+        environment_id: None,
+        network: None,
+        extra_allow_unix_sockets: &[],
+    };
+
+    let existing = create_seatbelt_command_args(params()).expect("build default policy");
+    let explicit_default = create_seatbelt_command_args_with_terminal_policy(
+        params(),
+        MacosTerminalPolicy::BackendDefault,
+    )
+    .expect("build explicit default policy");
+    assert_eq!(existing, explicit_default);
+    assert!(!seatbelt_policy_arg(&existing).contains(DENY_PREEXISTING_TERMINALS));
+
+    let deny_reopen = create_seatbelt_command_args_with_terminal_policy(
+        params(),
+        MacosTerminalPolicy::DenyPreexistingReopen,
+    )
+    .expect("build terminal-isolated policy");
+    let policy = seatbelt_policy_arg(&deny_reopen);
+    let broad_read = policy
+        .find("; allow read-only file operations\n(allow file-read*)")
+        .expect("full host reads should be present");
+    let deny = policy
+        .find(DENY_PREEXISTING_TERMINALS)
+        .expect("pre-existing terminal reopen deny should be present");
+    let allow = policy
+        .rfind(ALLOW_SANDBOX_CREATED_TERMINALS)
+        .expect("sandbox-created terminal allow should be present");
+    assert!(broad_read < deny);
+    assert!(deny < allow);
 }
 
 #[test]

@@ -7,6 +7,7 @@ codex_rust_crate(
         "src/seatbelt_base_policy.sbpl",
         "src/seatbelt_network_policy.sbpl",
         "src/seatbelt_preferences_policy.sbpl",
+        "src/seatbelt_terminal_policy.sbpl",
     ],
     crate_name = "codex_sandboxing",
     test_tags = ["no-sandbox"],

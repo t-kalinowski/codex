@@ -1,0 +1,11 @@
+; Prevent path-based access to terminal devices that predate the sandbox.
+(deny file-read* file-write*
+  (literal "/dev/tty")
+  (regex #"^/dev/ttys[^/]*$"))
+
+; PTYs created inside the sandbox carry this extension. Re-allow their slave
+; devices after the deny above while inherited descriptors remain unaffected.
+(allow file-read* file-write*
+  (require-all
+    (regex #"^/dev/ttys[^/]*$")
+    (extension "com.apple.sandbox.pty")))
