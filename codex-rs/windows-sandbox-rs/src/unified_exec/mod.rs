@@ -25,6 +25,22 @@ use std::path::PathBuf;
 pub use embedding_process::WindowsSandboxEmbeddingProcess;
 pub use embedding_process::WindowsSandboxEmbeddingProcessHandle;
 
+/// Native standard-stream wiring for an embedding launch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WindowsSandboxEmbeddingStdioMode {
+    Inherit,
+    Pipe,
+    Null,
+}
+
+/// Independent standard-stream wiring for an embedding launch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WindowsSandboxEmbeddingStdio {
+    pub stdin: WindowsSandboxEmbeddingStdioMode,
+    pub stdout: WindowsSandboxEmbeddingStdioMode,
+    pub stderr: WindowsSandboxEmbeddingStdioMode,
+}
+
 /// Fully resolved Windows sandbox session launch request.
 ///
 /// Callers should parse their own input shape first, then use this request to
@@ -65,7 +81,7 @@ pub struct WindowsSandboxEmbeddingRequest<'a> {
     /// Complete environment for the child process.
     pub env_map: HashMap<String, String>,
     pub additional_deny_write_paths: &'a [AbsolutePathBuf],
-    pub stdin_open: bool,
+    pub stdio: WindowsSandboxEmbeddingStdio,
 }
 
 /// Launches a non-TTY restricted-token session for an embedding application.
@@ -83,7 +99,7 @@ pub async fn spawn_windows_sandbox_session_for_embedding(
         request.cwd,
         request.env_map,
         request.additional_deny_write_paths,
-        request.stdin_open,
+        request.stdio,
     )
     .await
 }

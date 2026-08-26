@@ -167,8 +167,8 @@ impl WindowsSandboxEmbeddingProcessHandle {
 #[derive(Debug)]
 pub struct WindowsSandboxEmbeddingProcess {
     pub session: WindowsSandboxEmbeddingProcessHandle,
-    pub stdout_rx: mpsc::Receiver<Vec<u8>>,
-    pub stderr_rx: mpsc::Receiver<Vec<u8>>,
+    pub stdout_rx: Option<mpsc::Receiver<Vec<u8>>>,
+    pub stderr_rx: Option<mpsc::Receiver<Vec<u8>>>,
     pub exit_rx: oneshot::Receiver<i32>,
 }
 
@@ -176,11 +176,11 @@ impl WindowsSandboxEmbeddingProcess {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         writer_tx: Option<mpsc::Sender<EmbeddingStdinRequest>>,
-        stdout_rx: mpsc::Receiver<Vec<u8>>,
-        stderr_rx: mpsc::Receiver<Vec<u8>>,
+        stdout_rx: Option<mpsc::Receiver<Vec<u8>>>,
+        stderr_rx: Option<mpsc::Receiver<Vec<u8>>>,
         driver_exit_rx: oneshot::Receiver<i32>,
         terminator: Terminator,
-        writer_handle: JoinHandle<()>,
+        writer_handle: Option<JoinHandle<()>>,
         session_state: TempDir,
         acl_lease: EmbeddingAclLease,
     ) -> Self {
@@ -204,7 +204,7 @@ impl WindowsSandboxEmbeddingProcess {
             inner: Arc::new(EmbeddingProcessInner {
                 writer_tx: Mutex::new(writer_tx),
                 terminator: Mutex::new(Some(terminator)),
-                writer_handle: Mutex::new(Some(writer_handle)),
+                writer_handle: Mutex::new(writer_handle),
                 wait_handle: Mutex::new(Some(wait_handle)),
                 exit_status,
                 exit_code,

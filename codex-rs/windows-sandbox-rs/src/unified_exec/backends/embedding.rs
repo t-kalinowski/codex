@@ -4,10 +4,12 @@ use crate::embedding_token::prepare_embedding_session_security;
 use crate::process::read_handle_loop;
 use crate::resolved_permissions::ResolvedWindowsSandboxPermissions;
 use crate::spawn_prep::LegacyAclSids;
+use crate::unified_exec::WindowsSandboxEmbeddingStdio;
+use crate::unified_exec::WindowsSandboxEmbeddingStdioMode;
 use crate::unified_exec::embedding_process::EmbeddingStdinRequest;
 use crate::unified_exec::embedding_process::WindowsSandboxEmbeddingProcess;
-use crate::unified_exec::embedding_spawn::EmbeddingPipeSpawnHandles;
-use crate::unified_exec::embedding_spawn::spawn_embedding_process_with_pipes;
+use crate::unified_exec::embedding_spawn::EmbeddingStdioSpawnHandles;
+use crate::unified_exec::embedding_spawn::spawn_embedding_process_with_stdio;
 use anyhow::Result;
 use codex_protocol::models::PermissionProfile;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -35,7 +37,7 @@ pub(crate) async fn spawn_windows_sandbox_session_for_embedding(
     cwd: &AbsolutePathBuf,
     env_map: HashMap<String, String>,
     additional_deny_write_paths: &[AbsolutePathBuf],
-    stdin_open: bool,
+    stdio: WindowsSandboxEmbeddingStdio,
 ) -> Result<WindowsSandboxEmbeddingProcess> {
     let permissions =
         ResolvedWindowsSandboxPermissions::try_from_permission_profile_for_workspace_roots(
@@ -99,13 +101,13 @@ pub(crate) async fn spawn_windows_sandbox_session_for_embedding(
         )
         .collect::<Vec<_>>();
 
-    let pipe_handles = match spawn_embedding_process_with_pipes(
+    let stdio_handles = match spawn_embedding_process_with_stdio(
         security.h_token,
         &capability_sids,
         &command,
         cwd,
         &env_map,
-        stdin_open,
+        stdio,
     ) {
         Ok(handles) => handles,
         Err(error) => {
@@ -116,22 +118,22 @@ pub(crate) async fn spawn_windows_sandbox_session_for_embedding(
         }
     };
     Ok(finish_embedding_spawn(
-        pipe_handles,
+        stdio_handles,
         security.h_token,
-        stdin_open,
+        stdio,
         session_state,
         acl_lease,
     ))
 }
 
 fn finish_embedding_spawn(
-    handles: EmbeddingPipeSpawnHandles,
+    handles: EmbeddingStdioSpawnHandles,
     token_handle: HANDLE,
-    stdin_open: bool,
+    stdio: WindowsSandboxEmbeddingStdio,
     session_state: tempfile::TempDir,
     acl_lease: crate::embedding_acl::EmbeddingAclLease,
 ) -> WindowsSandboxEmbeddingProcess {
-    let EmbeddingPipeSpawnHandles {
+    let EmbeddingStdioSpawnHandles {
         process,
         job,
         stdin_write,
@@ -139,16 +141,26 @@ fn finish_embedding_spawn(
         stderr_read,
         desktop,
     } = handles;
-    let (writer_tx, writer_rx) = mpsc::channel(128);
-    let (stdout_tx, stdout_rx) = mpsc::channel(256);
-    let (stderr_tx, stderr_rx) = mpsc::channel(256);
-    let stdout_join = spawn_output_reader(stdout_read, stdout_tx);
-    let stderr_join = spawn_output_reader(stderr_read, stderr_tx);
+    let (writer_tx, writer_handle) = match stdin_write {
+        Some(stdin_write) => {
+            let (writer_tx, writer_rx) = mpsc::channel(128);
+            (
+                Some(writer_tx),
+                Some(spawn_input_writer(stdin_write, writer_rx)),
+            )
+        }
+        None => (None, None),
+    };
+    let (stdout_rx, stdout_join) = output_transport(stdout_read);
+    let (stderr_rx, stderr_join) = output_transport(stderr_read);
     let output_join = std::thread::spawn(move || {
-        let _ = stdout_join.join();
-        let _ = stderr_join.join();
+        if let Some(stdout_join) = stdout_join {
+            let _ = stdout_join.join();
+        }
+        if let Some(stderr_join) = stderr_join {
+            let _ = stderr_join.join();
+        }
     });
-    let writer_handle = spawn_input_writer(stdin_write, writer_rx);
     let (driver_exit_tx, driver_exit_rx) = oneshot::channel();
     let process_handle = Arc::new(Mutex::new(Some(process.hProcess)));
     let wait_process_handle = Arc::clone(&process_handle);
@@ -159,8 +171,8 @@ fn finish_embedding_spawn(
             WaitForSingleObject(process.hProcess, INFINITE);
             GetExitCodeProcess(process.hProcess, &mut exit_code);
         }
-        let _ = output_join.join();
         let _ = driver_exit_tx.send(exit_code as i32);
+        let _ = output_join.join();
         unsafe {
             if process.hThread != 0 && process.hThread != INVALID_HANDLE_VALUE {
                 CloseHandle(process.hThread);
@@ -180,8 +192,20 @@ fn finish_embedding_spawn(
     let terminate_process_handle = Arc::clone(&process_handle);
     let terminator =
         Box::new(move || terminate_job_or_process(&terminate_job, &terminate_process_handle));
+    debug_assert_eq!(
+        writer_tx.is_some(),
+        matches!(stdio.stdin, WindowsSandboxEmbeddingStdioMode::Pipe)
+    );
+    debug_assert_eq!(
+        stdout_rx.is_some(),
+        matches!(stdio.stdout, WindowsSandboxEmbeddingStdioMode::Pipe)
+    );
+    debug_assert_eq!(
+        stderr_rx.is_some(),
+        matches!(stdio.stderr, WindowsSandboxEmbeddingStdioMode::Pipe)
+    );
     WindowsSandboxEmbeddingProcess::new(
-        stdin_open.then_some(writer_tx),
+        writer_tx,
         stdout_rx,
         stderr_rx,
         driver_exit_rx,
@@ -190,6 +214,24 @@ fn finish_embedding_spawn(
         session_state,
         acl_lease,
     )
+}
+
+fn output_transport(
+    output_read: Option<HANDLE>,
+) -> (
+    Option<mpsc::Receiver<Vec<u8>>>,
+    Option<std::thread::JoinHandle<()>>,
+) {
+    match output_read {
+        Some(output_read) => {
+            let (output_tx, output_rx) = mpsc::channel(256);
+            (
+                Some(output_rx),
+                Some(spawn_output_reader(output_read, output_tx)),
+            )
+        }
+        None => (None, None),
+    }
 }
 
 fn spawn_output_reader(
@@ -202,11 +244,11 @@ fn spawn_output_reader(
 }
 
 fn spawn_input_writer(
-    input_write: Option<HANDLE>,
+    input_write: HANDLE,
     mut writer_rx: mpsc::Receiver<EmbeddingStdinRequest>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::task::spawn_blocking(move || {
-        let mut input_write = input_write;
+        let mut input_write = Some(input_write);
         while let Some(request) = writer_rx.blocking_recv() {
             match request {
                 EmbeddingStdinRequest::Write { bytes, completed } => {

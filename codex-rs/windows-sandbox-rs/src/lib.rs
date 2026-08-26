@@ -330,6 +330,10 @@ pub use unified_exec::WindowsSandboxEmbeddingProcessHandle;
 #[cfg(target_os = "windows")]
 pub use unified_exec::WindowsSandboxEmbeddingRequest;
 #[cfg(target_os = "windows")]
+pub use unified_exec::WindowsSandboxEmbeddingStdio;
+#[cfg(target_os = "windows")]
+pub use unified_exec::WindowsSandboxEmbeddingStdioMode;
+#[cfg(target_os = "windows")]
 pub use unified_exec::WindowsSandboxSessionRequest;
 #[cfg(target_os = "windows")]
 pub use unified_exec::spawn_windows_sandbox_session_elevated_for_permission_profile;
