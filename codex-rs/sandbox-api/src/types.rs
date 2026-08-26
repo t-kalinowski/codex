@@ -20,7 +20,7 @@ pub enum SandboxBackend {
     WindowsElevated,
 }
 
-/// Features enforced by the selected native backend.
+/// Features available from the selected native backend when requested.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SandboxCapabilities {
     pub backend: SandboxBackend,
@@ -32,6 +32,48 @@ pub struct SandboxCapabilities {
     pub interrupt: bool,
     /// Whether termination remains authoritative for descendants after the root exits.
     pub process_tree_termination: bool,
+    /// Whether host terminal devices can be hidden while inherited and new terminals remain usable.
+    pub terminal_isolation: bool,
+}
+
+/// Native standard-stream connection used for one child stream.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum SandboxStdioMode {
+    /// Inherit the embedding process's native descriptor or handle.
+    Inherit,
+    /// Create a pipe and expose its embedding-process end through the facade.
+    Pipe,
+    /// Connect the stream to the platform null device.
+    Null,
+}
+
+/// Independent standard-stream configuration for one launch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SandboxStdio {
+    pub stdin: SandboxStdioMode,
+    pub stdout: SandboxStdioMode,
+    pub stderr: SandboxStdioMode,
+}
+
+impl Default for SandboxStdio {
+    fn default() -> Self {
+        Self {
+            stdin: SandboxStdioMode::Null,
+            stdout: SandboxStdioMode::Pipe,
+            stderr: SandboxStdioMode::Pipe,
+        }
+    }
+}
+
+/// Ownership contract for the launched process lifetime.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum SandboxLifetime {
+    /// Use the backend's ordinary process ownership without requesting durable tree supervision.
+    BackendDefault,
+    /// Retain native authority over the root and its isolated process tree until retirement.
+    SupervisedProcessTree,
 }
 
 /// Linux helper executable used to enter the Codex Linux sandbox.
@@ -194,11 +236,22 @@ pub enum NetworkPolicy {
     Unrestricted,
 }
 
-/// Filesystem and network policy for one child.
+/// Access policy for terminal device paths.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum TerminalPolicy {
+    /// Retain the selected backend's ordinary terminal-device behavior.
+    BackendDefault,
+    /// Permit inherited streams and sandbox-created terminals without reopening host devices.
+    InheritedAndCreatedOnly,
+}
+
+/// Filesystem, network, and terminal policy for one child.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SandboxPolicy {
     pub filesystem: FileSystemPolicy,
     pub network: NetworkPolicy,
+    pub terminal: TerminalPolicy,
 }
 
 impl SandboxPolicy {
@@ -209,6 +262,7 @@ impl SandboxPolicy {
                 rules: Vec::new(),
             },
             network: NetworkPolicy::Denied,
+            terminal: TerminalPolicy::BackendDefault,
         }
     }
 
@@ -219,6 +273,7 @@ impl SandboxPolicy {
                 rules: Vec::new(),
             },
             network: NetworkPolicy::Denied,
+            terminal: TerminalPolicy::BackendDefault,
         }
     }
 
@@ -248,6 +303,11 @@ impl SandboxPolicy {
         self.network = NetworkPolicy::Unrestricted;
         self
     }
+
+    pub fn terminal_inherited_or_created(mut self) -> Self {
+        self.terminal = TerminalPolicy::InheritedAndCreatedOnly;
+        self
+    }
 }
 
 /// One sandboxed process launch request.
@@ -255,8 +315,8 @@ impl SandboxPolicy {
 pub struct SandboxRequest {
     pub command: CommandSpec,
     pub policy: SandboxPolicy,
-    /// Whether the child starts with writable stdin.
-    pub stdin_open: bool,
+    pub stdio: SandboxStdio,
+    pub lifetime: SandboxLifetime,
 }
 
 impl SandboxRequest {
@@ -264,17 +324,28 @@ impl SandboxRequest {
         Self {
             command,
             policy,
-            stdin_open: false,
+            stdio: SandboxStdio::default(),
+            lifetime: SandboxLifetime::BackendDefault,
         }
     }
 
-    pub fn stdin_open(mut self) -> Self {
-        self.stdin_open = true;
+    pub fn stdin(mut self, mode: SandboxStdioMode) -> Self {
+        self.stdio.stdin = mode;
         self
     }
 
-    pub fn stdin_closed(mut self) -> Self {
-        self.stdin_open = false;
+    pub fn stdout(mut self, mode: SandboxStdioMode) -> Self {
+        self.stdio.stdout = mode;
+        self
+    }
+
+    pub fn stderr(mut self, mode: SandboxStdioMode) -> Self {
+        self.stdio.stderr = mode;
+        self
+    }
+
+    pub fn lifetime(mut self, lifetime: SandboxLifetime) -> Self {
+        self.lifetime = lifetime;
         self
     }
 }

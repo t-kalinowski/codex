@@ -3,12 +3,15 @@ use crate::CommandSpec;
 use crate::SandboxBackend;
 use crate::SandboxCapabilities;
 use crate::SandboxError;
+use crate::SandboxFeature;
+use crate::SandboxLifetime;
 use crate::SandboxRequest;
 use crate::SandboxRuntimeConfig;
+use crate::SandboxStdio;
+use crate::TerminalPolicy;
 use crate::policy::prepare_policy;
 use crate::policy::validate_absolute_path;
 use crate::policy::validate_existing_path_encoding;
-use crate::process::ChildStdinMode;
 use crate::process::SandboxedChild;
 use std::path::Path;
 use std::path::PathBuf;
@@ -116,6 +119,24 @@ impl SandboxRuntime {
     pub async fn spawn(&self, request: SandboxRequest) -> Result<SandboxedChild, SandboxError> {
         validate_command_cwd(&request.command)?;
         self.inner.validate_command(&request.command)?;
+        if request.lifetime == SandboxLifetime::SupervisedProcessTree
+            && !self.inner.capabilities.process_tree_termination
+        {
+            return Err(SandboxError::UnsupportedPolicy {
+                backend: self.inner.backend,
+                feature: SandboxFeature::ProcessTreeTermination,
+                message: "durable supervised process-tree ownership is unavailable".to_string(),
+            });
+        }
+        if request.policy.terminal == TerminalPolicy::InheritedAndCreatedOnly
+            && !self.inner.capabilities.terminal_isolation
+        {
+            return Err(SandboxError::UnsupportedPolicy {
+                backend: self.inner.backend,
+                feature: SandboxFeature::TerminalIsolation,
+                message: "isolating host terminal-device paths is unavailable".to_string(),
+            });
+        }
         self.inner
             .validate_backend(&request.command, request.policy.network)?;
         let internal_read_roots = self.inner.internal_read_roots();
@@ -126,7 +147,13 @@ impl SandboxRuntime {
             &internal_read_roots,
         )?;
         self.inner
-            .spawn(request.command, prepared, request.stdin_open)
+            .spawn(
+                request.command,
+                prepared,
+                request.stdio,
+                request.lifetime,
+                request.policy.terminal,
+            )
             .await
     }
 }
@@ -232,25 +259,61 @@ impl RuntimeInner {
         self: &Arc<Self>,
         command: CommandSpec,
         prepared: crate::policy::PreparedPolicy,
-        stdin_open: bool,
+        stdio: SandboxStdio,
+        lifetime: SandboxLifetime,
+        terminal: TerminalPolicy,
     ) -> Result<SandboxedChild, SandboxError> {
-        let stdin_mode = if stdin_open {
-            ChildStdinMode::Open
-        } else {
-            ChildStdinMode::Closed
-        };
-
+        #[cfg(not(target_os = "macos"))]
+        let _ = terminal;
         #[cfg(target_os = "macos")]
-        return self.spawn_macos(command, prepared, stdin_mode).await;
+        return self
+            .spawn_macos(command, prepared, stdio, lifetime, terminal)
+            .await;
         #[cfg(target_os = "linux")]
-        return self.spawn_linux(command, prepared, stdin_mode).await;
+        return self.spawn_linux(command, prepared, stdio, lifetime).await;
         #[cfg(target_os = "windows")]
-        return self.spawn_windows(command, prepared, stdin_mode).await;
+        return self.spawn_windows(command, prepared, stdio, lifetime).await;
         #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
         Err(SandboxError::UnsupportedPlatform {
             platform: std::env::consts::OS.to_string(),
         })
     }
+}
+
+/// Terminates every other live member of the caller's isolated sandbox process group.
+pub fn terminate_current_process_group_members() -> Result<(), SandboxError> {
+    #[cfg(target_os = "macos")]
+    {
+        let process_id = std::process::id();
+        let process_id_native =
+            libc::pid_t::try_from(process_id).map_err(|_| SandboxError::InvalidOperation {
+                message: "the current process ID cannot identify a native process group"
+                    .to_string(),
+            })?;
+        let process_group_id = unsafe { libc::getpgrp() };
+        let session_id = unsafe {
+            libc::getsid(/*pid*/ 0)
+        };
+        if process_group_id != process_id_native || session_id != process_id_native {
+            return Err(SandboxError::InvalidOperation {
+                message:
+                    "the caller is not the leader of its own isolated process group and session"
+                        .to_string(),
+            });
+        }
+        codex_utils_pty::process_group::kill_process_group_members_except(process_id, process_id)
+            .map_err(|source| {
+                SandboxError::io("terminating current sandbox process-group members", source)
+            })
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    Err(SandboxError::UnsupportedPolicy {
+        backend: host_backend(),
+        feature: SandboxFeature::CurrentProcessGroupTermination,
+        message: "terminating the current process group while preserving its leader is unavailable on this backend"
+            .to_string(),
+    })
 }
 
 fn validate_command_cwd(command: &CommandSpec) -> Result<(), SandboxError> {

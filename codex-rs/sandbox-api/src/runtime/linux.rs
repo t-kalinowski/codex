@@ -40,6 +40,7 @@ impl RuntimeInner {
                 network_unrestricted: true,
                 interrupt: true,
                 process_tree_termination: false,
+                terminal_isolation: false,
             },
             state_dir,
             linux_helper,
@@ -86,7 +87,8 @@ impl RuntimeInner {
         self: &Arc<Self>,
         command: CommandSpec,
         prepared: crate::policy::PreparedPolicy,
-        stdin_mode: ChildStdinMode,
+        stdio: SandboxStdio,
+        lifetime: SandboxLifetime,
     ) -> Result<SandboxedChild, SandboxError> {
         use codex_protocol::models::PermissionProfile;
         use codex_sandboxing::landlock::create_linux_sandbox_command_args_for_permission_profile;
@@ -125,7 +127,7 @@ impl RuntimeInner {
         process.arg(self.linux_helper.registry_root());
         process.args(helper_args);
         configure_command(&mut process, &command.cwd, command.env);
-        crate::process::spawn_unix(process, self.backend, Arc::clone(self), stdin_mode).await
+        crate::process::spawn_unix(process, self.backend, Arc::clone(self), stdio, lifetime).await
     }
 }
 

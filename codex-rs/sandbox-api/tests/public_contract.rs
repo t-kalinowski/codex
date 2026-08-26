@@ -14,13 +14,18 @@ use codex_sandbox_api::SandboxCapabilities;
 use codex_sandbox_api::SandboxError;
 use codex_sandbox_api::SandboxExitStatus;
 use codex_sandbox_api::SandboxFeature;
+use codex_sandbox_api::SandboxLifetime;
 use codex_sandbox_api::SandboxPolicy;
 use codex_sandbox_api::SandboxRequest;
 use codex_sandbox_api::SandboxRuntime;
 use codex_sandbox_api::SandboxRuntimeConfig;
+use codex_sandbox_api::SandboxStdio;
+use codex_sandbox_api::SandboxStdioMode;
 use codex_sandbox_api::SandboxedChild;
 use codex_sandbox_api::SandboxedOutput;
+use codex_sandbox_api::SandboxedProcess;
 use codex_sandbox_api::SandboxedStdin;
+use codex_sandbox_api::TerminalPolicy;
 #[cfg(target_os = "windows")]
 use codex_sandbox_api::WindowsOptions;
 use pretty_assertions::assert_eq;
@@ -45,9 +50,13 @@ fn constructs_the_documented_public_request() {
         .read_only(runtime_root.clone())
         .read_write(cache_root.clone())
         .deny(home.clone())
-        .network_denied();
-    let request = SandboxRequest::new(command, policy).stdin_open();
-    let closed_request = request.clone().stdin_closed();
+        .network_denied()
+        .terminal_inherited_or_created();
+    let request = SandboxRequest::new(command, policy)
+        .stdin(SandboxStdioMode::Pipe)
+        .stdout(SandboxStdioMode::Inherit)
+        .stderr(SandboxStdioMode::Null)
+        .lifetime(SandboxLifetime::SupervisedProcessTree);
     let config = SandboxRuntimeConfig::new(state_dir.clone());
 
     assert_eq!(config.state_dir, state_dir);
@@ -56,8 +65,15 @@ fn constructs_the_documented_public_request() {
     assert_eq!(request.command.args, ["--stdio", "-v"]);
     assert_eq!(request.command.cwd, cwd);
     assert_eq!(request.command.env, env);
-    assert!(request.stdin_open);
-    assert!(!closed_request.stdin_open);
+    assert_eq!(
+        request.stdio,
+        SandboxStdio {
+            stdin: SandboxStdioMode::Pipe,
+            stdout: SandboxStdioMode::Inherit,
+            stderr: SandboxStdioMode::Null,
+        }
+    );
+    assert_eq!(request.lifetime, SandboxLifetime::SupervisedProcessTree);
     assert_eq!(
         request.policy.filesystem.base,
         FileSystemBase::PlatformMinimal
@@ -86,6 +102,30 @@ fn constructs_the_documented_public_request() {
         }
     );
     assert_eq!(request.policy.network, NetworkPolicy::Denied);
+    assert_eq!(
+        request.policy.terminal,
+        TerminalPolicy::InheritedAndCreatedOnly
+    );
+}
+
+#[test]
+fn request_defaults_preserve_version_one_streams_without_requesting_supervision() {
+    let request = SandboxRequest::new(
+        CommandSpec::new("worker", "/workspace", BTreeMap::new()),
+        SandboxPolicy::host_read_only(),
+    );
+
+    assert_eq!(
+        request.stdio,
+        SandboxStdio {
+            stdin: SandboxStdioMode::Null,
+            stdout: SandboxStdioMode::Pipe,
+            stderr: SandboxStdioMode::Pipe,
+        }
+    );
+    assert_eq!(request.stdio, SandboxStdio::default());
+    assert_eq!(request.lifetime, SandboxLifetime::BackendDefault);
+    assert_eq!(request.policy.terminal, TerminalPolicy::BackendDefault);
 }
 
 #[test]
@@ -127,8 +167,10 @@ fn preserves_nested_rule_order() {
 #[test]
 fn exposes_the_versioned_runtime_and_process_contract() {
     let _: u32 = SANDBOX_API_VERSION;
+    assert_eq!(SANDBOX_API_VERSION, 2);
     assert_send_sync::<SandboxRuntime>();
     assert_send::<SandboxedChild>();
+    assert_send_sync::<SandboxedProcess>();
     assert_send::<SandboxedStdin>();
     assert_send::<SandboxedOutput>();
     let _ = [
@@ -147,6 +189,8 @@ fn exposes_the_versioned_runtime_and_process_contract() {
         SandboxFeature::NetworkUnrestricted,
         SandboxFeature::Interrupt,
         SandboxFeature::ProcessTreeTermination,
+        SandboxFeature::CurrentProcessGroupTermination,
+        SandboxFeature::TerminalIsolation,
     ];
     let _: fn(SandboxExitStatus) -> Option<i32> = SandboxExitStatus::code;
     let _: fn(SandboxExitStatus) -> Option<i32> = SandboxExitStatus::signal;
@@ -171,11 +215,14 @@ fn exposes_the_versioned_runtime_and_process_contract() {
     let _: fn(SandboxRuntimeConfig) -> Result<SandboxRuntime, SandboxError> = SandboxRuntime::new;
 
     let _ = child_contract as fn(&mut SandboxedChild);
+    let _ = process_contract as fn(&SandboxedProcess);
     let _ = runtime_contract as fn(&SandboxRuntime, SandboxRequest);
     let _ = capabilities_contract as fn(SandboxCapabilities);
     let _ = error_contract as fn(SandboxError);
     let _ = stdin_contract;
     let _ = output_contract;
+    let _: fn() -> Result<(), SandboxError> =
+        codex_sandbox_api::terminate_current_process_group_members;
 }
 
 fn assert_send<T: Send>() {}
@@ -186,11 +233,17 @@ fn child_contract(child: &mut SandboxedChild) {
     let _: Option<SandboxedStdin> = child.take_stdin();
     let _: Option<SandboxedOutput> = child.take_stdout();
     let _: Option<SandboxedOutput> = child.take_stderr();
-    drop(child.wait());
-    let _ = child.try_status();
-    let _ = child.interrupt();
-    let _ = child.terminate();
-    let _ = child.backend();
+    let _: SandboxedProcess = child.process();
+}
+
+fn process_contract(process: &SandboxedProcess) {
+    drop(process.wait_root());
+    let _ = process.try_root_status();
+    let _ = process.interrupt();
+    let _ = process.terminate();
+    drop(process.retire());
+    let _ = process.backend();
+    let _ = process.lifetime();
 }
 
 fn runtime_contract(runtime: &SandboxRuntime, request: SandboxRequest) {
@@ -208,6 +261,7 @@ fn capabilities_contract(capabilities: SandboxCapabilities) {
         network_unrestricted,
         interrupt,
         process_tree_termination,
+        terminal_isolation,
     } = capabilities;
     let _ = (
         backend,
@@ -218,6 +272,7 @@ fn capabilities_contract(capabilities: SandboxCapabilities) {
         network_unrestricted,
         interrupt,
         process_tree_termination,
+        terminal_isolation,
     );
 }
 
@@ -231,6 +286,7 @@ fn error_contract(error: SandboxError) {
             message,
         } => drop((backend, feature, message)),
         SandboxError::InvalidCommand { message } => drop(message),
+        SandboxError::InvalidOperation { message } => drop(message),
         SandboxError::InvalidPath { path, message } => drop((path, message)),
         SandboxError::Preparation {
             backend,

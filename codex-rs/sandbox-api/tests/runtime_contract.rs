@@ -10,6 +10,7 @@ use codex_sandbox_api::SandboxPolicy;
 use codex_sandbox_api::SandboxRequest;
 use codex_sandbox_api::SandboxRuntime;
 use codex_sandbox_api::SandboxRuntimeConfig;
+use codex_sandbox_api::SandboxStdioMode;
 use codex_sandbox_api::SandboxedOutput;
 use pretty_assertions::assert_eq;
 use std::collections::BTreeMap;
@@ -131,7 +132,8 @@ async fn run_and_collect(
     stdin: Option<&[u8]>,
 ) -> TestResult<(SandboxExitStatus, Vec<u8>, Vec<u8>)> {
     let mut child = runtime.spawn(request).await?;
-    assert_eq!(child.backend(), runtime.capabilities().backend);
+    let process = child.process();
+    assert_eq!(process.backend(), runtime.capabilities().backend);
     let stdout = required(child.take_stdout(), "stdout should be piped")?;
     let stderr = required(child.take_stderr(), "stderr should be piped")?;
     let stdout_task = tokio::spawn(collect(stdout));
@@ -143,7 +145,7 @@ async fn run_and_collect(
     } else {
         assert!(child.take_stdin().is_none());
     }
-    let status = child.wait().await?;
+    let status = process.wait_root().await?;
     let stdout = stdout_task.await??;
     let stderr = stderr_task.await??;
     Ok((status, stdout, stderr))
@@ -176,7 +178,8 @@ async fn preserves_command_cwd_environment_and_raw_streams() -> TestResult {
         .arg(omitted_env)
         .arg("--stdio")
         .arg("-v");
-    let request = SandboxRequest::new(command, writable_host_policy(temp.path())).stdin_open();
+    let request = SandboxRequest::new(command, writable_host_policy(temp.path()))
+        .stdin(SandboxStdioMode::Pipe);
     let input = b"request\0\x80\xff\n";
 
     let (status, stdout, stderr) = run_and_collect(&runtime, request, Some(input)).await?;
@@ -224,6 +227,7 @@ async fn reports_ordinary_exit_and_try_status() -> TestResult {
         writable_host_policy(temp.path()),
     );
     let mut child = runtime.spawn(request).await?;
+    let process = child.process();
     let stdout_task = tokio::spawn(collect(required(
         child.take_stdout(),
         "stdout should be piped",
@@ -233,14 +237,14 @@ async fn reports_ordinary_exit_and_try_status() -> TestResult {
         "stderr should be piped",
     )?));
 
-    assert!(child.try_status().is_none());
-    let status = child.wait().await?;
+    assert!(process.try_root_status()?.is_none());
+    let status = process.wait_root().await?;
 
     assert_eq!(status.code(), Some(23));
     assert_eq!(status.signal(), None);
     assert!(!status.success());
     assert_eq!(
-        child.try_status().map(SandboxExitStatus::code),
+        process.try_root_status()?.map(SandboxExitStatus::code),
         Some(Some(23))
     );
     assert_eq!(stdout_task.await??, b"");
@@ -1023,11 +1027,12 @@ async fn waiting_child(
 async fn terminate_stops_the_child() -> TestResult {
     let temp = tempfile::tempdir()?;
     let runtime = runtime(&temp)?;
-    let mut child = waiting_child(&runtime, temp.path()).await?;
-    assert!(child.try_status().is_none());
+    let child = waiting_child(&runtime, temp.path()).await?;
+    let process = child.process();
+    assert!(process.try_root_status()?.is_none());
 
-    child.terminate()?;
-    let status = timeout(Duration::from_secs(10), child.wait()).await??;
+    process.terminate()?;
+    let status = timeout(Duration::from_secs(10), process.wait_root()).await??;
 
     assert!(!status.success());
     #[cfg(unix)]
@@ -1045,10 +1050,11 @@ async fn interrupt_stops_the_child_when_supported() -> TestResult {
     if !runtime.capabilities().interrupt {
         return Ok(());
     }
-    let mut child = waiting_child(&runtime, temp.path()).await?;
+    let child = waiting_child(&runtime, temp.path()).await?;
+    let process = child.process();
 
-    child.interrupt()?;
-    let status = timeout(Duration::from_secs(10), child.wait()).await??;
+    process.interrupt()?;
+    let status = timeout(Duration::from_secs(10), process.wait_root()).await??;
 
     assert!(!status.success());
     #[cfg(unix)]
@@ -1143,8 +1149,8 @@ async fn incomplete_file_descriptor_enumeration_prevents_target_execution() -> T
 
     let error = match runtime.spawn(request).await {
         Err(error) => error,
-        Ok(mut child) => {
-            let _ = child.wait().await;
+        Ok(child) => {
+            let _ = child.process().wait_root().await;
             return Err("target launched after incomplete descriptor enumeration".into());
         }
     };

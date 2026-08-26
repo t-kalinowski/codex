@@ -2,6 +2,7 @@ use crate::SandboxBackend;
 use crate::SandboxError;
 #[cfg(windows)]
 use crate::SandboxFeature;
+use crate::SandboxLifetime;
 use crate::runtime::RuntimeInner;
 use std::io;
 use std::sync::Arc;
@@ -54,13 +55,6 @@ impl SandboxExitStatus {
     }
 }
 
-/// Whether a newly spawned child exposes writable standard input.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ChildStdinMode {
-    Open,
-    Closed,
-}
-
 #[derive(Clone, Debug)]
 enum ProcessCompletion {
     Running,
@@ -89,7 +83,16 @@ impl ProcessLease {
         }
     }
 
-    fn try_status(&self) -> Option<SandboxExitStatus> {
+    async fn retire(&self) -> Result<SandboxExitStatus, SandboxError> {
+        match self {
+            #[cfg(unix)]
+            Self::Unix(process) => process.retire().await,
+            #[cfg(windows)]
+            Self::Windows(process) => process.retire().await,
+        }
+    }
+
+    fn try_status(&self) -> Result<Option<SandboxExitStatus>, SandboxError> {
         match self {
             #[cfg(unix)]
             Self::Unix(process) => process.try_status(),
@@ -225,38 +228,52 @@ impl SandboxedOutput {
     }
 }
 
-/// Opaque owner and controller for one sandboxed process.
+/// Opaque owner of one sandboxed launch and its optional pipe handles.
 pub struct SandboxedChild {
-    backend: SandboxBackend,
-    process: ProcessLease,
+    process: SandboxedProcess,
     stdin: Option<SandboxedStdin>,
     stdout: Option<SandboxedOutput>,
     stderr: Option<SandboxedOutput>,
 }
 
 impl SandboxedChild {
-    /// Takes the writable raw-byte input stream when the request opened stdin.
+    /// Takes the writable raw-byte input stream when stdin was configured as a pipe.
     pub fn take_stdin(&mut self) -> Option<SandboxedStdin> {
         self.stdin.take()
     }
 
-    /// Takes the raw standard-output stream.
+    /// Takes the raw standard-output stream when stdout was configured as a pipe.
     pub fn take_stdout(&mut self) -> Option<SandboxedOutput> {
         self.stdout.take()
     }
 
-    /// Takes the raw standard-error stream.
+    /// Takes the raw standard-error stream when stderr was configured as a pipe.
     pub fn take_stderr(&mut self) -> Option<SandboxedOutput> {
         self.stderr.take()
     }
 
-    /// Waits for process completion and preserves the native signal distinction on Unix.
-    pub async fn wait(&mut self) -> Result<SandboxExitStatus, SandboxError> {
+    /// Returns a cloneable controller for observing and retiring the process lifetime.
+    pub fn process(&self) -> SandboxedProcess {
+        self.process.clone()
+    }
+}
+
+/// Cloneable controller for one sandboxed process lifetime.
+#[derive(Clone)]
+pub struct SandboxedProcess {
+    backend: SandboxBackend,
+    lifetime: SandboxLifetime,
+    process: ProcessLease,
+}
+
+impl SandboxedProcess {
+    /// Observes the direct root's exit without retiring a supervised process group.
+    pub async fn wait_root(&self) -> Result<SandboxExitStatus, SandboxError> {
         self.process.wait().await
     }
 
-    /// Returns the process status when it is already available.
-    pub fn try_status(&self) -> Option<SandboxExitStatus> {
+    /// Polls and returns the direct root status without blocking.
+    pub fn try_root_status(&self) -> Result<Option<SandboxExitStatus>, SandboxError> {
         self.process.try_status()
     }
 
@@ -265,13 +282,26 @@ impl SandboxedChild {
         self.process.interrupt(self.backend)
     }
 
-    /// Requests immediate termination of the sandboxed process group or backend session.
+    /// Requests immediate termination of the owned process or supervised process tree.
     pub fn terminate(&self) -> Result<(), SandboxError> {
         self.process.terminate()
+    }
+
+    /// Retires the selected lifetime and returns the root status.
+    ///
+    /// A supervised lifetime first quiesces the process tree and reaps the root once.
+    /// The backend-default lifetime is equivalent to waiting for the direct root.
+    pub async fn retire(&self) -> Result<SandboxExitStatus, SandboxError> {
+        self.process.retire().await
     }
 
     /// Returns the native sandbox backend enforcing this process.
     pub fn backend(&self) -> SandboxBackend {
         self.backend
+    }
+
+    /// Returns the ownership contract selected for this launch.
+    pub fn lifetime(&self) -> SandboxLifetime {
+        self.lifetime
     }
 }

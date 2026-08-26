@@ -21,6 +21,16 @@ use std::process::ExitCode;
 use std::thread;
 use std::time::Duration;
 
+#[cfg(target_os = "macos")]
+#[path = "sandbox_api_fixture/macos.rs"]
+mod macos;
+#[cfg(unix)]
+#[path = "sandbox_api_fixture/stdio.rs"]
+mod stdio;
+#[cfg(unix)]
+#[path = "sandbox_api_fixture/supervision.rs"]
+mod supervision;
+
 fn main() -> ExitCode {
     // This must remain before runtime or thread creation. Linux re-enters this
     // binary through the reserved helper alias.
@@ -55,6 +65,34 @@ fn run() -> Result<(), String> {
         "marker" => marker(&mut args),
         "network-connect" => network_connect(&mut args),
         "network-denied" => network_denied(&mut args),
+        #[cfg(target_os = "macos")]
+        "macos-cpu-count" => macos::cpu_count(),
+        #[cfg(target_os = "macos")]
+        "macos-boottime" => macos::boottime(),
+        #[cfg(target_os = "macos")]
+        "macos-posix-semaphore" => macos::posix_semaphore(),
+        #[cfg(target_os = "macos")]
+        "macos-pty-created" => macos::pty_created(),
+        #[cfg(target_os = "macos")]
+        "macos-terminal-reopen-denied" => macos::terminal_reopen_denied(&mut args),
+        #[cfg(unix)]
+        "stdio-inherit-driver" => stdio::inherit_driver(&mut args),
+        #[cfg(unix)]
+        "stdio-inherited-regular" => stdio::inherited_regular(),
+        #[cfg(unix)]
+        "stdio-null-device" => stdio::null_device(),
+        #[cfg(unix)]
+        "stdio-inherited-pty" => stdio::inherited_pty(&mut args),
+        #[cfg(unix)]
+        "supervised-tree" => supervision::supervised_tree(&mut args),
+        #[cfg(unix)]
+        "supervised-tree-child" => supervision::tree_child(&mut args),
+        #[cfg(unix)]
+        "supervised-tree-grandchild" => supervision::tree_grandchild(),
+        #[cfg(unix)]
+        "supervised-except-self" => supervision::except_self(&mut args),
+        #[cfg(unix)]
+        "supervised-except-self-refused" => supervision::except_self_refused(),
         "wait" => wait_forever(),
         _ => Err(format!("unknown fixture mode `{mode}`")),
     }
@@ -141,6 +179,7 @@ fn current_executable(args: &mut impl Iterator<Item = OsString>) -> Result<(), S
             .spawn(request)
             .await
             .map_err(|error| error.to_string())?;
+        let process = child.process();
         let stdout = child
             .take_stdout()
             .ok_or_else(|| "missing stdout".to_string())?;
@@ -149,7 +188,10 @@ fn current_executable(args: &mut impl Iterator<Item = OsString>) -> Result<(), S
             .ok_or_else(|| "missing stderr".to_string())?;
         let stdout_task = tokio::spawn(drain(stdout));
         let stderr_task = tokio::spawn(drain(stderr));
-        let status = child.wait().await.map_err(|error| error.to_string())?;
+        let status = process
+            .wait_root()
+            .await
+            .map_err(|error| error.to_string())?;
         stdout_task.await.map_err(|error| error.to_string())??;
         stderr_task.await.map_err(|error| error.to_string())??;
         if !status.success() {
@@ -199,9 +241,9 @@ fn current_executable_state_write_rejected(
                 .network_unrestricted(),
         );
         let error = match async_runtime.block_on(runtime.spawn(request)) {
-            Ok(mut child) => {
+            Ok(child) => {
                 async_runtime
-                    .block_on(child.wait())
+                    .block_on(child.process().wait_root())
                     .map_err(|error| error.to_string())?;
                 return Err("sandbox unexpectedly spawned the target".to_string());
             }

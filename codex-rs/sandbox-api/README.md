@@ -1,6 +1,6 @@
 # Codex sandbox embedding API
 
-`codex-sandbox-api` is a small, platform-agnostic facade over the sandbox implementations in this Codex fork. It lets another application launch a non-PTY child with an explicit filesystem policy, direct-network policy, complete environment, and separate raw standard streams.
+`codex-sandbox-api` is a small, platform-agnostic facade over the sandbox implementations in this Codex fork. It lets another application launch a non-PTY child with an explicit filesystem policy, direct-network policy, complete environment, independent native standard-stream configuration, and an optional supervised process-tree lifetime.
 
 This is a fork-maintained embedding interface, not an upstream-supported Codex API. The facade isolates consumers from Codex application, protocol, session, approval, model, MCP, app-server, and CLI types. Creating a runtime does not load Codex configuration, authenticate, start a Codex session, or read the user's normal `CODEX_HOME`.
 
@@ -10,7 +10,7 @@ Pin production builds to an immutable commit from the fork:
 
 ```toml
 [dependencies]
-codex-sandbox-api = { git = "https://github.com/<fork-owner>/codex", rev = "<immutable-commit-sha>", package = "codex-sandbox-api" }
+codex-sandbox-api = { git = "https://github.com/t-kalinowski/codex", rev = "<immutable-commit-sha>", package = "codex-sandbox-api" }
 tokio = { version = "1", features = ["io-util", "rt-multi-thread"] }
 ```
 
@@ -20,11 +20,11 @@ Do not depend on a rolling patch branch in a production build.
 
 `BackendPreference::PlatformDefault` selects one native backend and returns an error if that backend cannot be prepared. There is no unsandboxed backend or fallback.
 
-| Platform | Selected backend                             | Minimal reads | Read denies | Write restrictions | Network denial     | Interrupt | Process-tree termination              |
-| -------- | -------------------------------------------- | ------------- | ----------- | ------------------ | ------------------ | --------- | ------------------------------------- |
-| macOS    | Seatbelt                                     | Yes           | Yes         | Yes                | Yes                | Yes       | No; group signals require a live root |
-| Linux    | bubblewrap with the Codex helper and seccomp | Yes           | Yes         | Yes                | x86_64 and aarch64 | Yes       | No; group signals require a live root |
-| Windows  | restricted token with a job object           | No            | No          | Yes                | No                 | No        | Yes, by job object                    |
+| Platform | Selected backend                             | Minimal reads | Read denies | Write restrictions | Network denial     | Interrupt | Supervised process tree | Terminal isolation |
+| -------- | -------------------------------------------- | ------------- | ----------- | ------------------ | ------------------ | --------- | ----------------------- | ------------------ |
+| macOS    | Seatbelt                                     | Yes           | Yes         | Yes                | Yes                | Yes       | Yes, by isolated group  | Yes                |
+| Linux    | bubblewrap with the Codex helper and seccomp | Yes           | Yes         | Yes                | x86_64 and aarch64 | Yes       | No                      | No                 |
+| Windows  | restricted token with a job object           | No            | No          | Yes                | No                 | No        | Yes, by job object      | No                 |
 
 All three backends support unrestricted direct network access. Query `SandboxRuntime::capabilities()` instead of inferring support from the target OS. A policy that requests an unsupported feature returns `SandboxError::UnsupportedPolicy` before the target command starts.
 
@@ -49,6 +49,10 @@ More-specific rules follow the existing Codex backend semantics. Some nested com
 Canonicalization and symlink treatment otherwise come from the selected Codex sandbox implementation; the facade does not define a competing path-security model. Observable behavior can differ where the operating systems resolve links differently. Rule paths and the command working directory must be absolute. The command program must also be an absolute path; the facade never searches `PATH` for it.
 
 Only `NetworkPolicy::Denied` and `NetworkPolicy::Unrestricted` are supported. There is no destination-filtered or proxy-only mode. If direct network denial is unavailable, `Denied` is rejected rather than changed to `Unrestricted`.
+
+On macOS, `SandboxPolicy::terminal_inherited_or_created()` denies reopening `/dev/tty` and pre-existing `/dev/ttys*` paths. Standard streams inherited at launch remain native descriptors, and PTYs created after entering the sandbox remain usable. Other backends reject this option before launching the target. The default `TerminalPolicy::BackendDefault` preserves each backend's existing terminal behavior.
+
+The fork's shared Seatbelt base adds three general-purpose sysctl permissions: `kern.boottime`, `sysctl.name.*`, and `sysctl.oidfmt.*`. They support process boot-time and command-line CPU/sysctl queries. Version 2 does not add `/dev/dtracehelper`, configd, logd, notification-center, ptrauth, group-count, lockdown-state, or boot-argument permissions. It also does not include Codex's broader restricted-platform defaults, so host-read policy does not gain implicit `/tmp` or `/var/tmp` writes.
 
 For example:
 
@@ -96,13 +100,21 @@ The current Windows backend supports `HostReadOnly`, explicit writable roots, an
 
 ## Streams and lifecycle
 
-`SandboxedChild` exposes stdin, stdout, and stderr as separate raw-byte streams. Each stream can move independently into a Tokio task. `take_stdin()` returns `None` unless the request used `stdin_open()`. Each `take_*` method succeeds at most once. The facade does not decode UTF-8, merge output streams, or buffer a complete process output; callers should drain stdout and stderr concurrently.
+`SandboxRequest` configures stdin, stdout, and stderr independently with `SandboxStdioMode::{Inherit, Pipe, Null}`. `Inherit` passes the embedding process's native descriptor or handle; the facade does not create a forwarding task. `Pipe` exposes the embedding-process end through the corresponding `take_*()` method. `Null` connects the stream to the native null device. The default is null stdin with piped stdout and stderr, matching version 1.
+
+Each piped stream can move independently into a Tokio task. Each `take_*()` method succeeds at most once and returns `None` for inherited or null streams. The facade does not decode UTF-8, merge output streams, or buffer complete process output. Callers should drain piped stdout and stderr concurrently.
 
 macOS uses Codex's fork-safe descriptor sweep before `sandbox-exec`. If its fixed descriptor buffer cannot prove that enumeration was complete, spawning fails before `sandbox-exec` or the target runs.
 
-`wait()` returns a normalized `SandboxExitStatus`. Ordinary exit codes remain ordinary codes. Unix signal termination remains a signal and is not converted to `128 + signal`. `try_status()` is a best-effort nonblocking inspection; `None` means a completed status is not currently available.
+`SandboxedChild::process()` returns a cloneable `SandboxedProcess` controller. `wait_root()` observes the direct root's status. Ordinary exit codes remain ordinary codes. Unix signal termination remains a signal and is not converted to `128 + signal`. `try_root_status()` polls native state without blocking and returns `Ok(None)` while the root remains live.
 
-On macOS and Linux, `interrupt()` sends `SIGINT` to the child process group and `terminate()` kills that group while the root process is still running. The facade does not retain authority over Unix descendants after the root exits, so these backends report `process_tree_termination: false`. On Windows, `interrupt()` returns `UnsupportedPolicy`, while `terminate()` terminates the restricted process job. The runtime is retained internally until the child and all moved stream handles are released. The embedding application still owns higher-level restart, timeout, and service supervision.
+`SandboxLifetime::BackendDefault`, the default, does not request durable tree supervision. On Unix it observes and controls the direct root while preserving the embedding process's session and process group, which keeps inherited terminal and job-control behavior native. Windows retains its existing job-object ownership.
+
+`SandboxLifetime::SupervisedProcessTree` requests the stronger lifetime and is rejected before launch when the backend cannot provide it. On macOS the root starts as a new session and process-group leader. A non-reaping `waitid` observation preserves its wait status and PID identity after exit. `terminate()` quiesces exact-group members but leaves the root waitable. `retire()` quiesces the group, reaps the root once, and returns the root's original status; forced descendant cleanup does not replace a normal root status. Concurrent and repeated observations or retirements share the cached result. On Windows the corresponding lifetime is owned by the non-breakaway job object. Linux currently rejects it.
+
+On macOS, an in-sandbox group-leading supervisor can call `terminate_current_process_group_members()`. The operation first requires the caller to be both the leader of its own process group and the leader of its own session. It then repeatedly enumerates and signals other exact-group members while preserving the caller. This lets a relay reap and drain its worker transports before exiting. Other backends return an explicit unsupported-policy error.
+
+The runtime remains alive while the child, process controller, or any moved pipe handle exists. Dropping the last owner performs bounded termination and retirement for a supervised lifetime. The embedding application still owns higher-level restart and timeout policy.
 
 ## End-to-end example
 
@@ -115,6 +127,7 @@ use codex_sandbox_api::SandboxPolicy;
 use codex_sandbox_api::SandboxRequest;
 use codex_sandbox_api::SandboxRuntime;
 use codex_sandbox_api::SandboxRuntimeConfig;
+use codex_sandbox_api::SandboxStdioMode;
 use codex_sandbox_api::SandboxedOutput;
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -163,9 +176,10 @@ async fn run() -> Result<()> {
     let policy = SandboxPolicy::host_read_only()
         .read_write(&cache_dir)
         .network_unrestricted();
-    let request = SandboxRequest::new(command, policy).stdin_open();
+    let request = SandboxRequest::new(command, policy).stdin(SandboxStdioMode::Pipe);
 
     let mut child = runtime.spawn(request).await?;
+    let process = child.process();
     let stdout_task = tokio::spawn(collect(
         child.take_stdout().expect("stdout is always piped"),
     ));
@@ -177,7 +191,7 @@ async fn run() -> Result<()> {
     stdin.write_all(b"request\0\xff\n").await?;
     stdin.close().await?;
 
-    let status = child.wait().await?;
+    let status = process.wait_root().await?;
     let stdout = stdout_task.await??;
     let stderr = stderr_task.await??;
     std::io::stdout().write_all(&stdout)?;
@@ -207,16 +221,19 @@ async fn collect(mut output: SandboxedOutput) -> std::result::Result<Vec<u8>, Sa
 ## Current limits
 
 - Only the native platform default can be selected.
-- PTYs, approval, escalation, sessions, persistent output buffering, and an external command protocol are outside this facade.
+- Allocating a PTY as a public launch mode, approval, escalation, sessions, persistent output buffering, and an external command protocol are outside this facade. Native inherited PTYs and PTYs created by a sandboxed process remain supported streams.
 - The network policy is binary: denied or unrestricted.
+- Durable Unix process-tree supervision is currently implemented only on macOS. Windows uses its job object; Linux rejects `SupervisedProcessTree`.
+- Exact-group supervision does not follow descendants that deliberately leave the supervised macOS process group.
 - Linux direct network denial depends on the helper's seccomp support and is currently reported only on x86_64 and aarch64.
 - Nested allow-under-deny policies can be rejected when the native backend cannot express them without widening access.
 - The program and all policy paths must be absolute. The facade does not use the child environment to resolve a bare program name.
+- Resolving a bare executable to satisfy the absolute-program requirement can change the target-visible `argv[0]`; version 2 does not expose a separate `argv[0]` override.
 - Linux command components and Windows command and environment components must be valid UTF-8. All current backend policy paths and command working directories must be valid UTF-8. Invalid data is rejected without lossy conversion.
 - Linux rejects child environment keys beginning with `LD_`; macOS rejects keys beginning with `DYLD_`. Accepted environment entries otherwise replace the inherited environment exactly.
 - Linux requires the kernel `close_range` operation with close-on-exec support; an unavailable operation rejects the spawn.
 - macOS rejects a spawn when its 1,024-record fork-safe descriptor sweep cannot enumerate the complete open-descriptor table.
 - Windows does not currently support minimal reads, read deny rules, direct network denial, interrupts, or write-read-write nested carveouts.
-- Process-tree termination is a backend capability, not a promise of durable service supervision after the embedding application exits.
+- A supervised lifetime performs bounded cleanup when its last facade owner is dropped. It does not survive termination of the embedding application itself.
 
 See [REBASE.md](REBASE.md) for the public compatibility contract and the release-refresh procedure.

@@ -1,4 +1,5 @@
 use super::*;
+use crate::SandboxStdioMode;
 
 impl RuntimeInner {
     pub(super) fn new_windows(state_dir: PathBuf) -> Result<Self, SandboxError> {
@@ -14,6 +15,7 @@ impl RuntimeInner {
                 network_unrestricted: true,
                 interrupt: false,
                 process_tree_termination: true,
+                terminal_isolation: false,
             },
             state_dir,
         })
@@ -23,11 +25,13 @@ impl RuntimeInner {
         self: &Arc<Self>,
         command: CommandSpec,
         prepared: crate::policy::PreparedPolicy,
-        stdin_mode: ChildStdinMode,
+        stdio: SandboxStdio,
+        lifetime: SandboxLifetime,
     ) -> Result<SandboxedChild, SandboxError> {
         use codex_protocol::models::PermissionProfile;
         use codex_utils_absolute_path::AbsolutePathBuf;
         use codex_windows_sandbox::WindowsSandboxEmbeddingRequest;
+        use codex_windows_sandbox::WindowsSandboxEmbeddingStdio;
         use std::collections::HashMap;
 
         let cwd = AbsolutePathBuf::from_absolute_path(&command.cwd).map_err(|source| {
@@ -73,7 +77,11 @@ impl RuntimeInner {
                 cwd: &cwd,
                 env_map,
                 additional_deny_write_paths: &deny_write_paths,
-                stdin_open: matches!(stdin_mode, ChildStdinMode::Open),
+                stdio: WindowsSandboxEmbeddingStdio {
+                    stdin: windows_stdio_mode(stdio.stdin),
+                    stdout: windows_stdio_mode(stdio.stdout),
+                    stderr: windows_stdio_mode(stdio.stderr),
+                },
             },
         )
         .await
@@ -86,7 +94,20 @@ impl RuntimeInner {
             spawned,
             self.backend,
             Arc::clone(self),
-            stdin_mode,
+            stdio,
+            lifetime,
         ))
+    }
+}
+
+fn windows_stdio_mode(
+    mode: SandboxStdioMode,
+) -> codex_windows_sandbox::WindowsSandboxEmbeddingStdioMode {
+    use codex_windows_sandbox::WindowsSandboxEmbeddingStdioMode;
+
+    match mode {
+        SandboxStdioMode::Inherit => WindowsSandboxEmbeddingStdioMode::Inherit,
+        SandboxStdioMode::Pipe => WindowsSandboxEmbeddingStdioMode::Pipe,
+        SandboxStdioMode::Null => WindowsSandboxEmbeddingStdioMode::Null,
     }
 }

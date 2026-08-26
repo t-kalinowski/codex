@@ -20,7 +20,8 @@ impl RuntimeInner {
                 network_denial: true,
                 network_unrestricted: true,
                 interrupt: true,
-                process_tree_termination: false,
+                process_tree_termination: true,
+                terminal_isolation: true,
             },
             state_dir,
         })
@@ -30,13 +31,15 @@ impl RuntimeInner {
         self: &Arc<Self>,
         command: CommandSpec,
         prepared: crate::policy::PreparedPolicy,
-        stdin_mode: ChildStdinMode,
+        stdio: SandboxStdio,
+        lifetime: SandboxLifetime,
+        terminal: TerminalPolicy,
     ) -> Result<SandboxedChild, SandboxError> {
         use codex_sandboxing::seatbelt::CreateSeatbeltCommandArgsParams;
         use codex_sandboxing::seatbelt::MACOS_PATH_TO_SEATBELT_EXECUTABLE;
         use codex_sandboxing::seatbelt::create_seatbelt_command_args;
 
-        let seatbelt_args = create_seatbelt_command_args(CreateSeatbeltCommandArgsParams {
+        let params = CreateSeatbeltCommandArgsParams {
             command: Vec::new(),
             file_system_sandbox_policy: &prepared.file_system,
             network_sandbox_policy: prepared.network,
@@ -46,7 +49,16 @@ impl RuntimeInner {
             environment_id: None,
             network: None,
             extra_allow_unix_sockets: &[],
-        })
+        };
+        let seatbelt_args = match terminal {
+            TerminalPolicy::BackendDefault => create_seatbelt_command_args(params),
+            TerminalPolicy::InheritedAndCreatedOnly => {
+                codex_sandboxing::seatbelt::create_seatbelt_command_args_with_terminal_policy(
+                    params,
+                    codex_sandboxing::seatbelt::MacosTerminalPolicy::DenyPreexistingReopen,
+                )
+            }
+        }
         .map_err(|message| SandboxError::Preparation {
             backend: self.backend,
             message,
@@ -57,6 +69,6 @@ impl RuntimeInner {
         process.arg(command.program);
         process.args(command.args);
         configure_command(&mut process, &command.cwd, command.env);
-        crate::process::spawn_unix(process, self.backend, Arc::clone(self), stdin_mode).await
+        crate::process::spawn_unix(process, self.backend, Arc::clone(self), stdio, lifetime).await
     }
 }

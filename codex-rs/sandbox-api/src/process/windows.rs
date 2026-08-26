@@ -13,6 +13,7 @@ impl SandboxExitStatus {
 
 pub(super) struct WindowsProcess {
     session: Arc<WindowsSandboxEmbeddingProcessHandle>,
+    lifetime: SandboxLifetime,
     completion: watch::Receiver<ProcessCompletion>,
     _runtime: Arc<RuntimeInner>,
 }
@@ -43,17 +44,24 @@ impl WindowsProcess {
         }
     }
 
-    pub(super) fn try_status(&self) -> Option<SandboxExitStatus> {
+    pub(super) fn try_status(&self) -> Result<Option<SandboxExitStatus>, SandboxError> {
         if let ProcessCompletion::Exited(status) = *self.completion.borrow() {
-            return Some(status);
+            return Ok(Some(status));
         }
-        self.session.exit_code().map(SandboxExitStatus::from_code)
+        Ok(self.session.exit_code().map(SandboxExitStatus::from_code))
     }
 
     pub(super) fn terminate(&self) -> Result<(), SandboxError> {
         self.session
             .terminate()
             .map_err(|source| SandboxError::io("terminating sandboxed process", source))
+    }
+
+    pub(super) async fn retire(&self) -> Result<SandboxExitStatus, SandboxError> {
+        if self.lifetime == SandboxLifetime::SupervisedProcessTree {
+            self.terminate()?;
+        }
+        self.wait().await
     }
 }
 
@@ -68,7 +76,8 @@ impl SandboxedChild {
         spawned: WindowsSandboxEmbeddingProcess,
         backend: SandboxBackend,
         runtime: Arc<RuntimeInner>,
-        stdin_mode: ChildStdinMode,
+        stdio: crate::SandboxStdio,
+        lifetime: SandboxLifetime,
     ) -> Self {
         let WindowsSandboxEmbeddingProcess {
             session,
@@ -92,31 +101,36 @@ impl SandboxedChild {
         });
         let process = ProcessLease::Windows(Arc::new(WindowsProcess {
             session: Arc::clone(&session),
+            lifetime,
             completion,
             _runtime: runtime,
         }));
-        let stdin = match stdin_mode {
-            ChildStdinMode::Open => Some(SandboxedStdin {
+        let stdin = match stdio.stdin {
+            crate::SandboxStdioMode::Pipe => Some(SandboxedStdin {
                 inner: Some(StdinInner::Windows(Arc::clone(&session))),
                 _process: process.clone(),
             }),
-            ChildStdinMode::Closed => {
+            crate::SandboxStdioMode::Inherit | crate::SandboxStdioMode::Null => {
                 session.close_stdin_without_waiting();
                 None
             }
         };
-        Self {
+        let process_controller = SandboxedProcess {
             backend,
+            lifetime,
+            process: process.clone(),
+        };
+        Self {
             stdin,
-            stdout: Some(SandboxedOutput {
+            stdout: stdout_rx.map(|stdout_rx| SandboxedOutput {
                 inner: OutputInner::Windows(stdout_rx),
                 _process: process.clone(),
             }),
-            stderr: Some(SandboxedOutput {
+            stderr: stderr_rx.map(|stderr_rx| SandboxedOutput {
                 inner: OutputInner::Windows(stderr_rx),
                 _process: process.clone(),
             }),
-            process,
+            process: process_controller,
         }
     }
 }

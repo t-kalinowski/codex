@@ -4,7 +4,7 @@ use std::io;
 use std::path::PathBuf;
 use thiserror::Error;
 
-/// Policy capability that a selected backend cannot enforce.
+/// Capability or operation that a selected backend cannot provide.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum SandboxFeature {
@@ -16,6 +16,8 @@ pub enum SandboxFeature {
     NetworkUnrestricted,
     Interrupt,
     ProcessTreeTermination,
+    CurrentProcessGroupTermination,
+    TerminalIsolation,
 }
 
 /// Error returned while preparing, launching, or controlling a sandbox.
@@ -40,6 +42,9 @@ pub enum SandboxError {
 
     #[error("invalid sandbox command: {message}")]
     InvalidCommand { message: String },
+
+    #[error("invalid sandbox operation: {message}")]
+    InvalidOperation { message: String },
 
     #[error("invalid sandbox path `{}`: {message}", path.display())]
     InvalidPath { path: PathBuf, message: String },
