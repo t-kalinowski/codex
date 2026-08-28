@@ -75,7 +75,7 @@ const PROVIDER_NAME: &str = "Codex Windows Sandbox WFP";
 const PROVIDER_DESCRIPTION: &str = "Persistent WFP provider for Codex Windows sandbox filters";
 const SUBLAYER_NAME: &str = "Codex Windows Sandbox WFP";
 const SUBLAYER_DESCRIPTION: &str = "Persistent WFP sublayer for Codex Windows sandbox filters";
-const SUBLAYER_WEIGHT: u16 = 0x8000;
+const SUBLAYER_WEIGHT_HINT: u16 = 0x8000;
 
 // WFP identifies persistent providers, sublayers, and filters by stable GUIDs.
 // These values are Codex-owned identities; do not regenerate them unless we
@@ -243,19 +243,12 @@ fn verify_sublayer(engine: HANDLE) -> Result<()> {
             FWPM_SUBLAYER_FLAG_PERSISTENT
         );
     }
-    if sublayer.providerKey.is_null()
-        || !unsafe { guid_eq(&*sublayer.providerKey, &PROVIDER_KEY) }
+    if sublayer.providerKey.is_null() || !unsafe { guid_eq(&*sublayer.providerKey, &PROVIDER_KEY) }
     {
         anyhow::bail!("WFP sublayer is associated with an incompatible provider");
     }
     if sublayer.providerData.size != 0 {
         anyhow::bail!("WFP sublayer has incompatible provider data");
-    }
-    if sublayer.weight != SUBLAYER_WEIGHT {
-        anyhow::bail!(
-            "WFP sublayer has incompatible weight 0x{:04X}; expected 0x{SUBLAYER_WEIGHT:04X}",
-            sublayer.weight
-        );
     }
     Ok(())
 }
@@ -538,7 +531,9 @@ fn ensure_sublayer(engine: HANDLE) -> Result<()> {
         flags: FWPM_SUBLAYER_FLAG_PERSISTENT,
         providerKey: &provider_key as *const _ as *mut _,
         providerData: empty_blob(),
-        weight: SUBLAYER_WEIGHT,
+        // BFE may assign the closest available weight instead of preserving
+        // this requested value exactly.
+        weight: SUBLAYER_WEIGHT_HINT,
     };
 
     let result = unsafe { FwpmSubLayerAdd0(engine, &sublayer, null_mut()) };

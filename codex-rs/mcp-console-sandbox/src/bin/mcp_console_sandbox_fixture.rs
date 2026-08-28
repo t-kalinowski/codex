@@ -614,15 +614,26 @@ fn assert_windows_helper_control_denied() -> Result<(), String> {
 fn assert_windows_helper_token_unavailable() -> Result<(), String> {
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED;
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
     use windows_sys::Win32::Security::DuplicateToken;
     use windows_sys::Win32::Security::ImpersonateLoggedOnUser;
     use windows_sys::Win32::Security::RevertToSelf;
     use windows_sys::Win32::Security::SecurityImpersonation;
     use windows_sys::Win32::Security::TOKEN_DUPLICATE;
     use windows_sys::Win32::Security::TOKEN_QUERY;
+    use windows_sys::Win32::Storage::FileSystem::WRITE_DAC;
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::CreateToolhelp32Snapshot;
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::TH32CS_SNAPTHREAD;
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::THREADENTRY32;
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::Thread32First;
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::Thread32Next;
     use windows_sys::Win32::System::Threading::OpenProcess;
     use windows_sys::Win32::System::Threading::OpenProcessToken;
+    use windows_sys::Win32::System::Threading::OpenThread;
     use windows_sys::Win32::System::Threading::PROCESS_QUERY_LIMITED_INFORMATION;
+    use windows_sys::Win32::System::Threading::THREAD_DIRECT_IMPERSONATION;
+    use windows_sys::Win32::System::Threading::THREAD_IMPERSONATE;
+    use windows_sys::Win32::System::Threading::THREAD_SET_CONTEXT;
 
     let helper_process_id = windows_parent_process_id()?;
     let helper_process = unsafe {
@@ -635,6 +646,59 @@ fn assert_windows_helper_token_unavailable() -> Result<(), String> {
     if helper_process == 0 {
         let error = std::io::Error::last_os_error();
         if error.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) {
+            let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+            if snapshot == INVALID_HANDLE_VALUE {
+                return Err(format!(
+                    "create helper thread snapshot: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            let mut entry: THREADENTRY32 = unsafe { std::mem::zeroed() };
+            entry.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
+            let mut helper_thread_count = 0;
+            if unsafe { Thread32First(snapshot, &mut entry) } != 0 {
+                loop {
+                    if entry.th32OwnerProcessID == helper_process_id {
+                        helper_thread_count += 1;
+                        for (label, access) in [
+                            ("impersonate", THREAD_IMPERSONATE),
+                            (
+                                "supply a direct impersonation context",
+                                THREAD_DIRECT_IMPERSONATION,
+                            ),
+                            ("rewrite its DACL", WRITE_DAC),
+                            ("set its execution context", THREAD_SET_CONTEXT),
+                        ] {
+                            let thread = unsafe {
+                                OpenThread(access, /*b_inherit_handle*/ 0, entry.th32ThreadID)
+                            };
+                            if thread != 0 {
+                                unsafe { CloseHandle(thread) };
+                                unsafe { CloseHandle(snapshot) };
+                                return Err(format!(
+                                    "sandbox target could {label} through standalone helper thread {}",
+                                    entry.th32ThreadID
+                                ));
+                            }
+                            let error = std::io::Error::last_os_error();
+                            if error.raw_os_error() != Some(ERROR_ACCESS_DENIED as i32) {
+                                unsafe { CloseHandle(snapshot) };
+                                return Err(format!(
+                                    "opening standalone helper thread {} to {label} failed with unexpected error: {error}",
+                                    entry.th32ThreadID
+                                ));
+                            }
+                        }
+                    }
+                    if unsafe { Thread32Next(snapshot, &mut entry) } == 0 {
+                        break;
+                    }
+                }
+            }
+            unsafe { CloseHandle(snapshot) };
+            if helper_thread_count == 0 {
+                return Err("standalone helper has no observable threads".to_string());
+            }
             return Ok(());
         }
         return Err(format!(

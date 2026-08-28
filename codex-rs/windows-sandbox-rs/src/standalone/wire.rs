@@ -50,6 +50,7 @@ pub(super) enum WireStream {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct WireSpawnRequest {
+    pub(super) runner_sid: Vec<u8>,
     pub(super) program: WireNativeString,
     pub(super) args: Vec<WireNativeString>,
     pub(super) environment: Vec<(WireNativeString, WireNativeString)>,

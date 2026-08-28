@@ -3,12 +3,12 @@ load("//:defs.bzl", "codex_rust_crate")
 
 codex_rust_crate(
     name = "bwrap",
-    # Bazel wires vendored bubblewrap + libcap via :bwrap-ffi below and sets
-    # bwrap_available explicitly, so we skip Cargo's build.rs in Bazel builds.
-    build_script_enabled = False,
     binary_rustc_env_extra = {
         "bwrap": {"CARGO_PKG_VERSION": "{STABLE_CODEX_WORKSPACE_VERSION}"},
     },
+    # Bazel wires vendored bubblewrap + libcap via :bwrap-ffi below and sets
+    # bwrap_available explicitly, so we skip Cargo's build.rs in Bazel builds.
+    build_script_enabled = False,
     crate_name = "codex_bwrap",
     deps_extra = select({
         "@platforms//os:linux": [":bwrap-ffi"],

@@ -486,9 +486,13 @@ application code never ran.
 
 On Windows, the outer runner creates the standalone helper suspended, verifies
 that the runner and sandbox `TokenUser` SIDs differ, and replaces the helper
-process owner and protected DACL with runner- and `SYSTEM`-only access before
-resuming it. Failure leaves the helper suspended and terminates it before it
-can create a target. The standalone helper then creates the target suspended
+process and initial-thread owners and protected DACLs with runner- and
+`SYSTEM`-only access before resuming it. Failure leaves the helper suspended
+and terminates it before it can create a target. The exact runner SID crosses
+only the closed helper wire. The helper creates its later control thread behind
+a gate and installs a protected runner- and `SYSTEM`-only DACL plus an explicit
+`OWNER RIGHTS` denial before the target can resume. A failure to create or seal
+that thread retires the still-suspended target Job. The standalone helper then creates the target suspended
 and assigns it to its non-breakaway Job Object before sending `Ready`. The outer runner first
 installs the supervisor and releases unnecessary stream copies, then sends
 `CommitLaunch`. The helper resumes the target and sends `Committed` before the

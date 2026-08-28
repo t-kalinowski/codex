@@ -1,6 +1,7 @@
 use super::WindowsSandboxStandaloneOutcome;
 use super::WindowsSandboxStandaloneRetirementOutcome;
 use super::WindowsSandboxStandaloneRootOutcome;
+use super::process_security::HelperProcessSecurity;
 use super::setup::is_absolute_local_disk_path;
 use super::wire::HelperMessage;
 use super::wire::ParentMessage;
@@ -459,7 +460,7 @@ fn retire_job(
 }
 
 fn helper_run(reader: &mut File, writer: &mut File) -> Result<()> {
-    let request = match read_wire_frame::<ParentMessage>(reader)? {
+    let mut request = match read_wire_frame::<ParentMessage>(reader)? {
         Some(ParentMessage::Spawn(request)) => *request,
         Some(ParentMessage::CommitLaunch) => {
             anyhow::bail!("standalone helper received launch commit before spawn")
@@ -469,6 +470,9 @@ fn helper_run(reader: &mut File, writer: &mut File) -> Result<()> {
         }
         None => anyhow::bail!("standalone helper control channel closed before spawn"),
     };
+    let mut process_security =
+        HelperProcessSecurity::from_trusted_runner_sid(std::mem::take(&mut request.runner_sid))
+            .context("validate trusted runner SID")?;
     let descendant_grace = Duration::from_millis(request.descendant_grace_ms);
     let force_stop_timeout_ms = Arc::new(AtomicU64::new(request.force_stop_timeout_ms));
     let created = spawn_helper_target(request)?;
@@ -478,22 +482,17 @@ fn helper_run(reader: &mut File, writer: &mut File) -> Result<()> {
         return Err(error);
     }
     let reader = await_launch_commit(reader.try_clone()?, || created.job.terminate())?;
-    if unsafe { ResumeThread(created.process_info.hThread) } == u32::MAX {
-        let error = std::io::Error::last_os_error();
-        let _ = created.job.terminate();
-        return Err(error).context("resume committed standalone target");
-    }
-    if let Err(error) = write_wire_frame(writer, HelperMessage::Committed) {
-        let _ = created.job.terminate();
-        return Err(error);
-    }
     let forced = Arc::new(AtomicBool::new(false));
     let input_forced = Arc::clone(&forced);
     let input_job = Arc::clone(&created.job);
     let input_force_stop_timeout_ms = Arc::clone(&force_stop_timeout_ms);
-    std::thread::Builder::new()
+    let (control_gate_sender, control_gate_receiver) = std::sync::mpsc::channel();
+    let control_thread = match std::thread::Builder::new()
         .name("standalone-windows-sandbox-control".to_string())
         .spawn(move || {
+            if control_gate_receiver.recv().is_err() {
+                return;
+            }
             if helper_input_loop(reader, input_forced, input_force_stop_timeout_ms, || {
                 input_job.terminate()
             })
@@ -504,7 +503,41 @@ fn helper_run(reader: &mut File, writer: &mut File) -> Result<()> {
                 // the parent converts control EOF into a structured failure.
                 std::process::exit(1);
             }
-        })?;
+        }) {
+        Ok(thread) => thread,
+        Err(error) => {
+            let _ = created.job.terminate();
+            return Err(error).context("spawn standalone helper control thread");
+        }
+    };
+    if let Err(error) = process_security
+        .seal_helper_owned_thread(control_thread.as_raw_handle() as HANDLE)
+        .context("seal standalone helper control thread")
+    {
+        let _ = created.job.terminate();
+        drop(control_gate_sender);
+        let _ = control_thread.join();
+        return Err(error);
+    }
+    if unsafe { ResumeThread(created.process_info.hThread) } == u32::MAX {
+        let error = std::io::Error::last_os_error();
+        let _ = created.job.terminate();
+        drop(control_gate_sender);
+        let _ = control_thread.join();
+        return Err(error).context("resume committed standalone target");
+    }
+    if let Err(error) = write_wire_frame(writer, HelperMessage::Committed) {
+        let _ = created.job.terminate();
+        drop(control_gate_sender);
+        let _ = control_thread.join();
+        return Err(error);
+    }
+    if control_gate_sender.send(()).is_err() {
+        let _ = created.job.terminate();
+        let _ = control_thread.join();
+        anyhow::bail!("standalone helper control thread exited before launch commit");
+    }
+    drop(control_thread);
 
     let target = root_outcome(created.process_info.hProcess);
     if let Err(error) = write_wire_frame(writer, HelperMessage::RootExited(target.clone())) {

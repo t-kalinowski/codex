@@ -4,6 +4,7 @@ use super::WindowsSandboxStandaloneOutcome;
 use super::WindowsSandboxStandaloneRetirementOutcome;
 use super::WindowsSandboxStandaloneRootOutcome;
 use super::WindowsSandboxStandaloneStream;
+use super::process_security::HelperProcessSecurity;
 use super::setup::WindowsSandboxStandaloneNetworkIdentity;
 use super::setup::WindowsSandboxStandaloneSetupRequest;
 use super::setup::native_network_identity;
@@ -11,7 +12,6 @@ use super::setup::refresh_windows_sandbox_standalone_with_policy_lease;
 use super::setup::validate_setup_request;
 use super::setup::verify_windows_sandbox_standalone_network_with_policy_lease;
 use super::setup::windows_sandbox_standalone_setup_status;
-use super::process_security::HelperProcessSecurity;
 use super::wire::HelperMessage;
 use super::wire::ParentMessage;
 use super::wire::WireNativeString;
@@ -107,6 +107,7 @@ fn spawn_request_wire(
     request: &WindowsSandboxStandaloneLaunchRequest<'_>,
     helper_process: HANDLE,
     capability_sids: Vec<String>,
+    runner_sid: Vec<u8>,
 ) -> Result<WireSpawnRequest> {
     let mut args = Vec::with_capacity(request.command.args.len());
     for argument in &request.command.args {
@@ -120,6 +121,7 @@ fn spawn_request_wire(
         ));
     }
     Ok(WireSpawnRequest {
+        runner_sid,
         program: WireNativeString::from_os_str(request.command.program.as_os_str())?,
         args,
         environment,
@@ -207,8 +209,9 @@ fn minimal_helper_environment(state_dir: &Path) -> Result<Vec<u16>> {
 fn spawn_helper(
     request: &WindowsSandboxStandaloneSetupRequest,
     creds: &SandboxCreds,
-) -> Result<(PROCESS_INFORMATION, File, File)> {
+) -> Result<(PROCESS_INFORMATION, File, File, Vec<u8>)> {
     let mut process_security = HelperProcessSecurity::prepare(creds)?;
+    let runner_sid = process_security.runner_sid().to_vec();
     let (pipe_in_name, pipe_out_name) = pipe_pair();
     let input_pipe = create_named_pipe(&pipe_in_name, PIPE_ACCESS_OUTBOUND, &creds.username)?;
     let output_pipe = create_named_pipe(&pipe_out_name, PIPE_ACCESS_INBOUND, &creds.username)?;
@@ -262,13 +265,12 @@ fn spawn_helper(
 
     let connect_result = (|| -> Result<()> {
         process_security
-            .apply(process_info.hProcess)
-            .context("seal standalone helper process")?;
+            .seal_process_and_initial_thread(process_info.hProcess, process_info.hThread)
+            .context("seal standalone helper process and initial thread")?;
         if unsafe { ResumeThread(process_info.hThread) } == u32::MAX {
-            anyhow::bail!(
-                "ResumeThread failed for standalone helper: {}",
-                unsafe { GetLastError() }
-            );
+            anyhow::bail!("ResumeThread failed for standalone helper: {}", unsafe {
+                GetLastError()
+            });
         }
         connect_pipe_with_timeout(input_pipe, process_info.dwProcessId, "standalone pipe-in")?;
         connect_pipe_with_timeout(output_pipe, process_info.dwProcessId, "standalone pipe-out")?;
@@ -291,6 +293,7 @@ fn spawn_helper(
         process_info,
         unsafe { File::from_raw_handle(input_pipe as _) },
         unsafe { File::from_raw_handle(output_pipe as _) },
+        runner_sid,
     ))
 }
 
@@ -723,7 +726,7 @@ pub fn spawn_windows_sandbox_standalone(
     )?
     .ok_or_else(|| anyhow::anyhow!("prepared standalone sandbox credentials are unavailable"))?;
     let capability_sids = capability_sids(&request.setup)?;
-    let (process_info, control, events) = spawn_helper(&request.setup, &creds)?;
+    let (process_info, control, events, runner_sid) = spawn_helper(&request.setup, &creds)?;
     let helper = unsafe { OwnedHandle::from_raw_handle(process_info.hProcess as _) };
     let inner = Arc::new(StandaloneProcessInner {
         control: Mutex::new(Some(control)),
@@ -742,6 +745,7 @@ pub fn spawn_windows_sandbox_standalone(
         &request,
         inner.helper.as_raw_handle() as HANDLE,
         capability_sids,
+        runner_sid,
     ) {
         Ok(spawn) => spawn,
         Err(error) => {
