@@ -1,5 +1,8 @@
 use super::*;
 use pretty_assertions::assert_eq;
+use std::ffi::OsString;
+#[cfg(unix)]
+use std::os::unix::ffi::OsStringExt;
 
 #[test]
 fn legacy_landlock_flag_is_included_when_requested() {
@@ -79,6 +82,25 @@ fn permission_profile_flag_is_included() {
         args.windows(2)
             .any(|window| window[0] == "--command-cwd" && window[1] == "/tmp/link"),
         true
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn native_command_arguments_are_preserved() {
+    let native_argument = OsString::from_vec(vec![b'f', b'o', 0x80]);
+    let args = create_linux_sandbox_command_args_for_permission_profile_native(
+        vec![OsString::from("/bin/echo"), native_argument.clone()],
+        Path::new("/tmp/link"),
+        &PermissionProfile::read_only(),
+        Path::new("/tmp"),
+        /*use_legacy_landlock*/ false,
+        /*allow_network_for_proxy*/ false,
+    );
+
+    assert_eq!(
+        args[args.len() - 2..],
+        [OsString::from("/bin/echo"), native_argument]
     );
 }
 

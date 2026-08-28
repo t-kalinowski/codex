@@ -1,11 +1,13 @@
 use std::ffi::CString;
+use std::ffi::OsString;
 use std::fs::File;
 use std::os::fd::AsRawFd;
+use std::os::unix::ffi::OsStrExt;
 
-pub(crate) fn argv_to_cstrings(argv: &[String]) -> Vec<CString> {
+pub(crate) fn argv_to_cstrings(argv: &[OsString]) -> Vec<CString> {
     let mut cstrings: Vec<CString> = Vec::with_capacity(argv.len());
     for arg in argv {
-        match CString::new(arg.as_str()) {
+        match CString::new(arg.as_os_str().as_bytes()) {
             Ok(value) => cstrings.push(value),
             Err(err) => panic!("failed to convert argv to CString: {err}"),
         }
@@ -53,6 +55,17 @@ mod tests {
         make_files_inheritable(std::slice::from_ref(file.as_file()));
 
         assert_eq!(fd_flags(file.as_file().as_raw_fd()) & libc::FD_CLOEXEC, 0);
+    }
+
+    #[test]
+    fn argv_conversion_preserves_non_utf8_bytes() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let native = OsString::from_vec(vec![b'a', b'r', b'g', 0x80]);
+        let converted = argv_to_cstrings(std::slice::from_ref(&native));
+
+        assert_eq!(converted[0].as_bytes(), native.as_encoded_bytes());
     }
 
     fn set_cloexec(fd: libc::c_int) {

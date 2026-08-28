@@ -11,6 +11,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::fs::DirBuilder;
 use std::fs::File;
 use std::fs::Permissions;
@@ -81,7 +82,8 @@ struct ProxyRoutePlan {
 }
 
 pub(crate) fn prepare_host_proxy_route_spec() -> io::Result<(String, AbsolutePathBuf)> {
-    let (attribution_token, plan) = extract_attribution_token_and_plan(std::env::vars().collect());
+    let (attribution_token, plan) =
+        extract_attribution_token_and_plan(relevant_proxy_environment(std::env::vars_os())?);
     // SAFETY: the sandbox helper is single-threaded here, before it forks bridge workers or
     // executes the user command.
     unsafe {
@@ -139,6 +141,28 @@ pub(crate) fn prepare_host_proxy_route_spec() -> io::Result<(String, AbsolutePat
 
     let spec = serde_json::to_string(&ProxyRouteSpec { routes }).map_err(io::Error::other)?;
     Ok((spec, readable_socket_dir))
+}
+
+fn relevant_proxy_environment(
+    environment: impl IntoIterator<Item = (OsString, OsString)>,
+) -> io::Result<HashMap<String, String>> {
+    let mut relevant = HashMap::new();
+    for (key, value) in environment {
+        let Some(key) = key.to_str() else {
+            continue;
+        };
+        if !is_proxy_env_key(key) && key != PROXY_ATTRIBUTION_TOKEN_ENV_KEY {
+            continue;
+        }
+        let value = value.into_string().map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("managed proxy environment value for {key} must be valid Unicode"),
+            )
+        })?;
+        relevant.insert(key.to_string(), value);
+    }
+    Ok(relevant)
 }
 
 fn extract_attribution_token_and_plan(
@@ -612,10 +636,13 @@ mod tests {
     use super::parse_loopback_proxy_endpoint;
     use super::plan_proxy_routes;
     use super::proxy_socket_paths_fit;
+    use super::relevant_proxy_environment;
     use super::rewrite_proxy_env_value;
     use pretty_assertions::assert_eq;
     use std::collections::HashMap;
+    use std::ffi::OsString;
     use std::net::SocketAddr;
+    use std::os::unix::ffi::OsStringExt;
     use std::path::PathBuf;
 
     #[test]
@@ -699,6 +726,30 @@ mod tests {
                 }],
                 has_proxy_config: true,
             }
+        );
+    }
+
+    #[test]
+    fn unrelated_non_unicode_environment_is_ignored_by_proxy_planning() {
+        let environment = [
+            (
+                OsString::from("HTTP_PROXY"),
+                OsString::from("http://127.0.0.1:43128"),
+            ),
+            (
+                OsString::from("NATIVE_VALUE"),
+                OsString::from_vec(vec![b'n', b'a', b't', b'i', b'v', b'e', 0xff]),
+            ),
+        ];
+
+        let relevant = relevant_proxy_environment(environment).expect("proxy environment");
+
+        assert_eq!(
+            relevant,
+            HashMap::from([(
+                "HTTP_PROXY".to_string(),
+                "http://127.0.0.1:43128".to_string(),
+            )])
         );
     }
 
