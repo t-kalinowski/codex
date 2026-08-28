@@ -6,18 +6,20 @@ use anyhow::Context;
 use anyhow::Result;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use codex_otel::StatsigMetricsSettings;
 use codex_windows_sandbox::SETUP_VERSION;
 use codex_windows_sandbox::SetupErrorCode;
 use codex_windows_sandbox::SetupErrorReport;
 use codex_windows_sandbox::SetupFailure;
+use codex_windows_sandbox::WINDOWS_SANDBOX_STANDALONE_VERIFY_NETWORK_SWITCH;
+use codex_windows_sandbox::WindowsSandboxPolicyNamespace;
+use codex_windows_sandbox::WindowsSandboxStatsigMetricsSettings;
 use codex_windows_sandbox::add_deny_write_ace;
 use codex_windows_sandbox::convert_string_sid_to_sid;
+use codex_windows_sandbox::enroll_current_process_in_mcp_setup_job;
 use codex_windows_sandbox::ensure_allow_mask_aces_with_inheritance;
 use codex_windows_sandbox::ensure_allow_write_aces;
 use codex_windows_sandbox::extract_setup_failure;
 use codex_windows_sandbox::hide_newly_created_users;
-use codex_windows_sandbox::install_wfp_filters;
 use codex_windows_sandbox::log_note;
 use codex_windows_sandbox::log_writer;
 use codex_windows_sandbox::path_mask_allows;
@@ -87,6 +89,8 @@ struct Payload {
     version: u32,
     offline_username: String,
     online_username: String,
+    #[serde(default)]
+    policy_namespace: WindowsSandboxPolicyNamespace,
     codex_home: PathBuf,
     command_cwd: PathBuf,
     read_roots: Vec<PathBuf>,
@@ -99,12 +103,16 @@ struct Payload {
     #[serde(default)]
     allow_local_binding: bool,
     #[serde(default)]
-    otel: Option<StatsigMetricsSettings>,
+    otel: Option<WindowsSandboxStatsigMetricsSettings>,
     real_user: String,
     #[serde(default)]
     mode: SetupMode,
     #[serde(default)]
     refresh_only: bool,
+    #[serde(default)]
+    setup_parent_process_id: Option<u32>,
+    #[serde(default)]
+    setup_parent_creation_time: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, Default)]
@@ -437,14 +445,19 @@ pub fn main() -> Result<()> {
 }
 
 fn real_main() -> Result<()> {
-    let mut args = std::env::args().collect::<Vec<_>>();
-    if args.len() != 2 {
-        return Err(anyhow::Error::new(SetupFailure::new(
-            SetupErrorCode::HelperRequestArgsFailed,
-            "expected payload argument",
-        )));
-    }
-    let payload_b64 = args.remove(1);
+    let args = std::env::args().collect::<Vec<_>>();
+    let (payload_b64, verify_network) = match args.as_slice() {
+        [_, payload_b64] => (payload_b64, false),
+        [_, switch, payload_b64] if switch == WINDOWS_SANDBOX_STANDALONE_VERIFY_NETWORK_SWITCH => {
+            (payload_b64, true)
+        }
+        _ => {
+            return Err(anyhow::Error::new(SetupFailure::new(
+                SetupErrorCode::HelperRequestArgsFailed,
+                "expected setup payload or exact standalone network-verification invocation",
+            )));
+        }
+    };
     let payload_json = BASE64.decode(payload_b64).map_err(|err| {
         anyhow::Error::new(SetupFailure::new(
             SetupErrorCode::HelperRequestArgsFailed,
@@ -465,6 +478,49 @@ fn real_main() -> Result<()> {
                 payload.version
             ),
         )));
+    }
+    if !payload
+        .policy_namespace
+        .identities_match(&payload.offline_username, &payload.online_username)
+    {
+        return Err(anyhow::Error::new(SetupFailure::new(
+            SetupErrorCode::HelperRequestArgsFailed,
+            "sandbox identities do not match the requested policy namespace",
+        )));
+    }
+    let containment_required =
+        payload.policy_namespace == WindowsSandboxPolicyNamespace::McpConsole && !verify_network;
+    match (
+        containment_required,
+        payload.setup_parent_process_id,
+        payload.setup_parent_creation_time,
+    ) {
+        (true, Some(process_id), Some(creation_time)) => {
+            enroll_current_process_in_mcp_setup_job(process_id, creation_time).map_err(
+                |error| {
+                    anyhow::Error::new(SetupFailure::new(
+                        SetupErrorCode::HelperRequestArgsFailed,
+                        format!("standalone setup containment failed: {error:#}"),
+                    ))
+                },
+            )?;
+        }
+        (true, _, _) => {
+            return Err(anyhow::Error::new(SetupFailure::new(
+                SetupErrorCode::HelperRequestArgsFailed,
+                "standalone setup request is missing its parent containment identity",
+            )));
+        }
+        (false, None, None) => {}
+        (false, _, _) => {
+            return Err(anyhow::Error::new(SetupFailure::new(
+                SetupErrorCode::HelperRequestArgsFailed,
+                "setup request contains an unexpected parent containment identity",
+            )));
+        }
+    }
+    if verify_network {
+        return verify_network_policy(&payload);
     }
     let sbx_dir = sandbox_dir(&payload.codex_home);
     std::fs::create_dir_all(&sbx_dir).map_err(|err| {
@@ -506,6 +562,38 @@ fn real_main() -> Result<()> {
     result
 }
 
+fn verify_network_policy(payload: &Payload) -> Result<()> {
+    let offline_sid = resolve_sid(&payload.offline_username).map_err(|err| {
+        anyhow::Error::new(SetupFailure::new(
+            SetupErrorCode::HelperSidResolveFailed,
+            format!(
+                "resolve SID for offline user {} failed: {err}",
+                payload.offline_username
+            ),
+        ))
+    })?;
+    let offline_sid_str = string_from_sid_bytes(&offline_sid).map_err(anyhow::Error::msg)?;
+    firewall::verify_offline_sandbox_network(
+        payload.policy_namespace,
+        &offline_sid_str,
+        &payload.proxy_ports,
+        payload.allow_local_binding,
+    )?;
+    if payload.policy_namespace == WindowsSandboxPolicyNamespace::McpConsole {
+        codex_windows_sandbox::verify_wfp_filters_for_account_in_namespace(
+            &payload.offline_username,
+            payload.policy_namespace,
+        )
+        .map_err(|error| {
+            anyhow::Error::new(SetupFailure::new(
+                SetupErrorCode::HelperFirewallRuleVerifyFailed,
+                format!("required WFP policy verification failed: {error}"),
+            ))
+        })?;
+    }
+    Ok(())
+}
+
 fn run_setup(payload: &Payload, log: &mut dyn Write, sbx_dir: &Path) -> Result<()> {
     let writes_setup_marker = !payload.refresh_only && payload.mode != SetupMode::ReadAclsOnly;
     if writes_setup_marker {
@@ -519,6 +607,7 @@ fn run_setup(payload: &Payload, log: &mut dyn Write, sbx_dir: &Path) -> Result<(
     if writes_setup_marker {
         commit_setup_marker(
             &payload.codex_home,
+            payload.policy_namespace,
             &payload.offline_username,
             &payload.online_username,
             &payload.proxy_ports,
@@ -529,15 +618,21 @@ fn run_setup(payload: &Payload, log: &mut dyn Write, sbx_dir: &Path) -> Result<(
 }
 
 fn run_read_acl_only(payload: &Payload, log: &mut dyn Write) -> Result<()> {
-    let _read_acl_guard = match acquire_read_acl_mutex()? {
+    let _read_acl_guard = match acquire_read_acl_mutex(payload.policy_namespace)? {
         Some(guard) => guard,
+        None if payload.policy_namespace == WindowsSandboxPolicyNamespace::McpConsole => {
+            return Err(anyhow::Error::new(SetupFailure::new(
+                SetupErrorCode::HelperReadAclApplyFailed,
+                "another MCP Console read ACL update is still active",
+            )));
+        }
         None => {
             log_line(log, "read ACL helper already running; skipping")?;
             return Ok(());
         }
     };
     log_line(log, "read-acl-only mode: applying read ACLs")?;
-    let sandbox_group_sid = resolve_sandbox_users_group_sid()?;
+    let sandbox_group_sid = resolve_sandbox_users_group_sid(payload.policy_namespace)?;
     let sandbox_group_psid = sid_bytes_to_psid(&sandbox_group_sid)?;
     let mut refresh_errors: Vec<String> = Vec::new();
     if !payload.read_roots.is_empty() {
@@ -598,6 +693,7 @@ fn provision_and_hide_sandbox_users(
 ) -> Result<()> {
     let provision_result = provision_sandbox_users(
         &payload.codex_home,
+        payload.policy_namespace,
         &payload.offline_username,
         &payload.online_username,
         log,
@@ -625,6 +721,7 @@ fn configure_offline_sandbox_network(
     log: &mut dyn Write,
 ) -> Result<()> {
     let proxy_allowlist_result = firewall::ensure_offline_proxy_allowlist(
+        payload.policy_namespace,
         offline_sid_str,
         &payload.proxy_ports,
         payload.allow_local_binding,
@@ -639,7 +736,8 @@ fn configure_offline_sandbox_network(
             format!("ensure offline proxy allowlist failed: {err}"),
         )));
     }
-    let firewall_result = firewall::ensure_offline_outbound_block(offline_sid_str, log);
+    let firewall_result =
+        firewall::ensure_offline_outbound_block(payload.policy_namespace, offline_sid_str, log);
     if let Err(err) = firewall_result {
         if extract_setup_failure(&err).is_some() {
             return Err(err);
@@ -649,14 +747,52 @@ fn configure_offline_sandbox_network(
             format!("ensure offline outbound block failed: {err}"),
         )));
     }
-    install_wfp_filters(
-        &payload.codex_home,
-        &payload.offline_username,
-        payload.otel.as_ref(),
-        |message| {
-            let _ = log_line(log, message);
-        },
-    );
+    if payload.policy_namespace == WindowsSandboxPolicyNamespace::McpConsole {
+        let installed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            codex_windows_sandbox::install_wfp_filters_for_account_in_namespace(
+                &payload.offline_username,
+                payload.policy_namespace,
+            )
+        }));
+        match installed {
+            Ok(Ok(installed_filter_count)) => log_line(
+                log,
+                &format!(
+                    "WFP setup succeeded for {} with {installed_filter_count} installed filters",
+                    payload.offline_username
+                ),
+            )?,
+            Ok(Err(error)) => {
+                return Err(anyhow::Error::new(SetupFailure::new(
+                    SetupErrorCode::HelperFirewallRuleCreateOrAddFailed,
+                    format!("required WFP setup failed: {error}"),
+                )));
+            }
+            Err(payload) => {
+                let message = match payload.downcast::<String>() {
+                    Ok(message) => *message,
+                    Err(payload) => match payload.downcast::<&'static str>() {
+                        Ok(message) => (*message).to_string(),
+                        Err(_) => "unknown panic payload".to_string(),
+                    },
+                };
+                return Err(anyhow::Error::new(SetupFailure::new(
+                    SetupErrorCode::HelperFirewallRuleCreateOrAddFailed,
+                    format!("required WFP setup panicked: {message}"),
+                )));
+            }
+        }
+    } else {
+        codex_windows_sandbox::install_wfp_filters_in_namespace(
+            &payload.codex_home,
+            &payload.offline_username,
+            payload.policy_namespace,
+            payload.otel.as_ref(),
+            |message| {
+                let _ = log_line(log, message);
+            },
+        );
+    }
     Ok(())
 }
 
@@ -738,12 +874,13 @@ fn run_provision_only(payload: &Payload, log: &mut dyn Write, sbx_dir: &Path) ->
     })?;
     let offline_sid_str = string_from_sid_bytes(&offline_sid).map_err(anyhow::Error::msg)?;
 
-    let sandbox_group_sid = resolve_sandbox_users_group_sid().map_err(|err| {
-        anyhow::Error::new(SetupFailure::new(
-            SetupErrorCode::HelperSidResolveFailed,
-            format!("resolve sandbox users group SID failed: {err}"),
-        ))
-    })?;
+    let sandbox_group_sid =
+        resolve_sandbox_users_group_sid(payload.policy_namespace).map_err(|err| {
+            anyhow::Error::new(SetupFailure::new(
+                SetupErrorCode::HelperSidResolveFailed,
+                format!("resolve sandbox users group SID failed: {err}"),
+            ))
+        })?;
 
     configure_offline_sandbox_network(payload, &offline_sid_str, log)?;
 
@@ -769,12 +906,13 @@ fn run_setup_full(payload: &Payload, log: &mut dyn Write, sbx_dir: &Path) -> Res
     })?;
     let offline_sid_str = string_from_sid_bytes(&offline_sid).map_err(anyhow::Error::msg)?;
 
-    let sandbox_group_sid = resolve_sandbox_users_group_sid().map_err(|err| {
-        anyhow::Error::new(SetupFailure::new(
-            SetupErrorCode::HelperSidResolveFailed,
-            format!("resolve sandbox users group SID failed: {err}"),
-        ))
-    })?;
+    let sandbox_group_sid =
+        resolve_sandbox_users_group_sid(payload.policy_namespace).map_err(|err| {
+            anyhow::Error::new(SetupFailure::new(
+                SetupErrorCode::HelperSidResolveFailed,
+                format!("resolve sandbox users group SID failed: {err}"),
+            ))
+        })?;
     let sandbox_group_psid = sid_bytes_to_psid(&sandbox_group_sid).map_err(|err| {
         anyhow::Error::new(SetupFailure::new(
             SetupErrorCode::HelperSidResolveFailed,
@@ -810,8 +948,18 @@ fn run_setup_full(payload: &Payload, log: &mut dyn Write, sbx_dir: &Path) -> Res
 
     if payload.read_roots.is_empty() {
         log_line(log, "no read roots to grant; skipping read ACL helper")?;
+    } else if payload.policy_namespace == WindowsSandboxPolicyNamespace::McpConsole {
+        let mut read_payload = payload.clone();
+        read_payload.mode = SetupMode::ReadAclsOnly;
+        read_payload.refresh_only = true;
+        run_read_acl_only(&read_payload, log).map_err(|error| {
+            anyhow::Error::new(SetupFailure::new(
+                SetupErrorCode::HelperReadAclApplyFailed,
+                format!("apply required MCP Console read ACLs failed: {error}"),
+            ))
+        })?;
     } else {
-        match read_acl_mutex_exists() {
+        match read_acl_mutex_exists(payload.policy_namespace) {
             Ok(true) => {
                 log_line(log, "read ACL helper already running; skipping spawn")?;
             }
@@ -1046,7 +1194,7 @@ mod tests {
     use super::WRITE_ROOT_ALLOW_MASK;
     use super::convert_string_sid_to_sid;
     use super::workspace_write_cap_sids_for_path;
-    use codex_otel::StatsigMetricsSettings;
+    use codex_windows_sandbox::WindowsSandboxStatsigMetricsSettings;
     use codex_windows_sandbox::ensure_allow_mask_aces;
     use codex_windows_sandbox::ensure_allow_write_aces;
     use codex_windows_sandbox::load_or_create_cap_sids;
@@ -1100,7 +1248,7 @@ mod tests {
 
         assert_eq!(
             payload.otel,
-            Some(StatsigMetricsSettings {
+            Some(WindowsSandboxStatsigMetricsSettings {
                 environment: "prod".to_string(),
             })
         );

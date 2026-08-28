@@ -21,6 +21,17 @@ use url::Url;
 const MACOS_SEATBELT_BASE_POLICY: &str = include_str!("seatbelt_base_policy.sbpl");
 const MACOS_SEATBELT_NETWORK_POLICY: &str = include_str!("seatbelt_network_policy.sbpl");
 const MACOS_SEATBELT_PREFERENCES_POLICY: &str = include_str!("seatbelt_preferences_policy.sbpl");
+const MACOS_SEATBELT_TERMINAL_POLICY: &str = r##"; Prevent path-based access to terminal devices that predate the sandbox.
+(deny file-read* file-write*
+  (literal "/dev/tty")
+  (regex #"^/dev/ttys[^/]*$"))
+
+; PTYs created inside the sandbox carry this extension. Re-allow their slave
+; devices after the deny above while inherited descriptors remain unaffected.
+(allow file-read* file-write*
+  (require-all
+    (regex #"^/dev/ttys[^/]*$")
+    (extension "com.apple.sandbox.pty")))"##;
 const MACOS_RESTRICTED_READ_ONLY_PLATFORM_DEFAULTS: &str =
     include_str!("restricted_read_only_platform_defaults.sbpl");
 const MACOS_PROCESS_APPLICATIONS_READ_POLICY: &str =
@@ -31,6 +42,16 @@ pub(crate) enum MacosSeatbeltProfile {
     #[default]
     Process,
     FileSystemHelper,
+}
+
+/// Controls whether a process may reopen terminal devices that predate its sandbox.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum MacosTerminalPolicy {
+    /// Preserve Codex's existing Seatbelt terminal behavior.
+    #[default]
+    BackendDefault,
+    /// Keep inherited and sandbox-created PTYs while denying host terminal reopen by path.
+    DenyPreexistingReopen,
 }
 
 #[derive(Debug)]
@@ -837,13 +858,37 @@ pub struct CreateSeatbeltCommandArgsParams<'a> {
 pub fn create_seatbelt_command_args(
     args: CreateSeatbeltCommandArgsParams<'_>,
 ) -> Result<Vec<String>, String> {
-    create_seatbelt_command_args_with_profile(args, MacosSeatbeltProfile::Process)
-        .map_err(|err| err.to_string())
+    create_seatbelt_command_args_with_terminal_policy(args, MacosTerminalPolicy::BackendDefault)
+}
+
+/// Builds a Seatbelt invocation with an explicit closed terminal-device policy.
+pub fn create_seatbelt_command_args_with_terminal_policy(
+    args: CreateSeatbeltCommandArgsParams<'_>,
+    terminal_policy: MacosTerminalPolicy,
+) -> Result<Vec<String>, String> {
+    create_seatbelt_command_args_with_profile_and_terminal_policy(
+        args,
+        MacosSeatbeltProfile::Process,
+        terminal_policy,
+    )
+    .map_err(|err| err.to_string())
 }
 
 pub(crate) fn create_seatbelt_command_args_with_profile(
     args: CreateSeatbeltCommandArgsParams<'_>,
     profile: MacosSeatbeltProfile,
+) -> Result<Vec<String>, SeatbeltPreparationError> {
+    create_seatbelt_command_args_with_profile_and_terminal_policy(
+        args,
+        profile,
+        MacosTerminalPolicy::BackendDefault,
+    )
+}
+
+fn create_seatbelt_command_args_with_profile_and_terminal_policy(
+    args: CreateSeatbeltCommandArgsParams<'_>,
+    profile: MacosSeatbeltProfile,
+    terminal_policy: MacosTerminalPolicy,
 ) -> Result<Vec<String>, SeatbeltPreparationError> {
     let CreateSeatbeltCommandArgsParams {
         command,
@@ -995,6 +1040,12 @@ pub(crate) fn create_seatbelt_command_args_with_profile(
         policy_sections.push(MACOS_RESTRICTED_READ_ONLY_PLATFORM_DEFAULTS.to_string());
         if profile == MacosSeatbeltProfile::Process {
             policy_sections.push(MACOS_PROCESS_APPLICATIONS_READ_POLICY.to_string());
+        }
+    }
+    match terminal_policy {
+        MacosTerminalPolicy::BackendDefault => {}
+        MacosTerminalPolicy::DenyPreexistingReopen => {
+            policy_sections.push(MACOS_SEATBELT_TERMINAL_POLICY.to_string());
         }
     }
     policy_sections.push(deny_read_policy);

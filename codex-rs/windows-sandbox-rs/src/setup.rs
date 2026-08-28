@@ -4,6 +4,7 @@ use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::ffi::c_void;
+use std::io::Read;
 use std::os::windows::process::CommandExt;
 use std::path::Path;
 use std::path::PathBuf;
@@ -24,6 +25,7 @@ use crate::logging::current_log_file_path;
 use crate::logging::log_note;
 use crate::path_normalization::canonical_path_key;
 use crate::path_normalization::canonicalize_path;
+use crate::policy_namespace::WindowsSandboxPolicyNamespace;
 use crate::resolved_permissions::ResolvedWindowsSandboxPermissions;
 use crate::setup_error::SetupErrorCode;
 use crate::setup_error::SetupFailure;
@@ -32,6 +34,7 @@ use crate::setup_error::extract_failure;
 use crate::setup_error::failure;
 use crate::setup_error::read_setup_error_report;
 use crate::ssh_config_dependencies::ssh_config_dependency_paths;
+use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
 use base64::Engine;
@@ -47,12 +50,12 @@ use windows_sys::Win32::Security::FreeSid;
 use windows_sys::Win32::Security::SECURITY_NT_AUTHORITY;
 
 pub const SETUP_VERSION: u32 = 5;
-pub const OFFLINE_USERNAME: &str = "CodexSandboxOffline";
-pub const ONLINE_USERNAME: &str = "CodexSandboxOnline";
+pub const OFFLINE_USERNAME: &str = WindowsSandboxPolicyNamespace::Codex.offline_username();
+pub const ONLINE_USERNAME: &str = WindowsSandboxPolicyNamespace::Codex.online_username();
 const ERROR_CANCELLED: u32 = 1223;
 const SECURITY_BUILTIN_DOMAIN_RID: u32 = 0x0000_0020;
 const DOMAIN_ALIAS_RID_ADMINS: u32 = 0x0000_0220;
-const SETUP_EXE_FILENAME: &str = "codex-windows-sandbox-setup.exe";
+pub(crate) const SETUP_EXE_FILENAME: &str = "codex-windows-sandbox-setup.exe";
 const USERPROFILE_ROOT_EXCLUSIONS: &[&str] = &[
     ".ssh",
     ".tsh",
@@ -67,7 +70,7 @@ const USERPROFILE_ROOT_EXCLUSIONS: &[&str] = &[
     ".pki",
     ".terraform.d",
 ];
-const WINDOWS_PLATFORM_DEFAULT_READ_ROOTS: &[&str] = &[
+pub(crate) const WINDOWS_PLATFORM_DEFAULT_READ_ROOTS: &[&str] = &[
     r"C:\Windows",
     r"C:\Program Files",
     r"C:\Program Files (x86)",
@@ -300,7 +303,7 @@ pub fn run_setup_refresh_with_extra_read_roots(
     )
 }
 
-fn setup_refresh_deny_read_paths(
+pub(crate) fn setup_refresh_deny_read_paths(
     permission_profile: &PermissionProfile,
     workspace_roots: &[AbsolutePathBuf],
     command_cwd: &Path,
@@ -336,6 +339,7 @@ fn run_setup_refresh_inner(
         version: SETUP_VERSION,
         offline_username: OFFLINE_USERNAME.to_string(),
         online_username: ONLINE_USERNAME.to_string(),
+        policy_namespace: WindowsSandboxPolicyNamespace::Codex,
         codex_home: request.codex_home.to_path_buf(),
         command_cwd: request.command_cwd.to_path_buf(),
         read_roots,
@@ -348,6 +352,8 @@ fn run_setup_refresh_inner(
         real_user: std::env::var("USERNAME").unwrap_or_else(|_| "Administrators".to_string()),
         mode: SetupMode::Full,
         refresh_only: true,
+        setup_parent_process_id: None,
+        setup_parent_creation_time: None,
     };
     let json = serde_json::to_vec(&payload)?;
     let b64 = BASE64_STANDARD.encode(json);
@@ -358,6 +364,10 @@ fn run_setup_refresh_inner(
 
 fn run_setup_refresh_payload(b64: &str, codex_home: &Path) -> Result<()> {
     let exe = find_setup_exe();
+    run_setup_refresh_payload_with_exe(b64, codex_home, &exe)
+}
+
+fn run_setup_refresh_payload_with_exe(b64: &str, codex_home: &Path, exe: &Path) -> Result<()> {
     let sbx_dir = sandbox_dir(codex_home);
     let log_path = current_log_file_path(&sbx_dir);
     let cleared_report = match clear_setup_error_report(codex_home) {
@@ -371,7 +381,7 @@ fn run_setup_refresh_payload(b64: &str, codex_home: &Path) -> Result<()> {
         }
     };
     // Refresh should never request elevation; ensure verb isn't set and we don't trigger UAC.
-    let mut cmd = Command::new(&exe);
+    let mut cmd = Command::new(exe);
     cmd.arg(b64)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -421,6 +431,11 @@ pub struct SetupMarker {
     pub version: u32,
     pub offline_username: String,
     pub online_username: String,
+    #[serde(
+        default,
+        skip_serializing_if = "WindowsSandboxPolicyNamespace::is_codex"
+    )]
+    pub policy_namespace: WindowsSandboxPolicyNamespace,
     #[serde(default)]
     pub created_at: Option<String>,
     #[serde(default)]
@@ -439,6 +454,11 @@ impl SetupMarker {
             proxy_ports: self.proxy_ports.clone(),
             allow_local_binding: self.allow_local_binding,
         }
+    }
+
+    pub(crate) fn identities_match(&self, namespace: WindowsSandboxPolicyNamespace) -> bool {
+        self.policy_namespace == namespace
+            && namespace.identities_match(&self.offline_username, &self.online_username)
     }
 
     pub(crate) fn request_mismatch_reason(
@@ -482,9 +502,13 @@ impl SandboxUsersFile {
     pub fn version_matches(&self) -> bool {
         self.version == SETUP_VERSION
     }
+
+    pub(crate) fn identities_match(&self, namespace: WindowsSandboxPolicyNamespace) -> bool {
+        namespace.identities_match(&self.offline.username, &self.online.username)
+    }
 }
 
-fn is_elevated() -> Result<bool> {
+pub(crate) fn is_elevated() -> Result<bool> {
     unsafe {
         let mut administrators_group: *mut c_void = std::ptr::null_mut();
         let ok = AllocateAndInitializeSid(
@@ -666,34 +690,50 @@ pub(crate) fn effective_write_roots_for_permissions(
     filter_sensitive_write_roots(write_roots, codex_home)
 }
 
-#[derive(Serialize)]
-struct ElevationPayload {
-    version: u32,
-    offline_username: String,
-    online_username: String,
-    codex_home: PathBuf,
-    command_cwd: PathBuf,
-    read_roots: Vec<PathBuf>,
-    write_roots: Vec<PathBuf>,
+#[derive(Clone, Serialize)]
+pub(crate) struct ElevationPayload {
+    pub(crate) version: u32,
+    pub(crate) offline_username: String,
+    pub(crate) online_username: String,
+    #[serde(skip_serializing_if = "WindowsSandboxPolicyNamespace::is_codex")]
+    pub(crate) policy_namespace: WindowsSandboxPolicyNamespace,
+    pub(crate) codex_home: PathBuf,
+    pub(crate) command_cwd: PathBuf,
+    pub(crate) read_roots: Vec<PathBuf>,
+    pub(crate) write_roots: Vec<PathBuf>,
     #[serde(default)]
-    deny_read_paths: Vec<PathBuf>,
+    pub(crate) deny_read_paths: Vec<PathBuf>,
     #[serde(default)]
-    deny_write_paths: Vec<PathBuf>,
-    proxy_ports: Vec<u16>,
+    pub(crate) deny_write_paths: Vec<PathBuf>,
+    pub(crate) proxy_ports: Vec<u16>,
     #[serde(default)]
-    allow_local_binding: bool,
-    otel: Option<codex_otel::StatsigMetricsSettings>,
-    real_user: String,
-    mode: SetupMode,
+    pub(crate) allow_local_binding: bool,
+    pub(crate) otel: Option<crate::WindowsSandboxStatsigMetricsSettings>,
+    pub(crate) real_user: String,
+    pub(crate) mode: SetupMode,
     #[serde(default)]
-    refresh_only: bool,
+    pub(crate) refresh_only: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) setup_parent_process_id: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) setup_parent_creation_time: Option<u64>,
 }
 
 #[derive(Clone, Copy, Serialize)]
 #[serde(rename_all = "kebab-case")]
-enum SetupMode {
+pub(crate) enum SetupMode {
     Full,
     ProvisionOnly,
+}
+
+#[cfg(feature = "telemetry")]
+fn global_statsig_metrics_settings() -> Option<crate::WindowsSandboxStatsigMetricsSettings> {
+    codex_otel::global_statsig_metrics_settings()
+}
+
+#[cfg(not(feature = "telemetry"))]
+fn global_statsig_metrics_settings() -> Option<crate::WindowsSandboxStatsigMetricsSettings> {
+    None
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -741,7 +781,7 @@ const ALLOW_LOCAL_BINDING_ENV_KEY: &str = "CODEX_NETWORK_ALLOW_LOCAL_BINDING";
 // Internal wire format shared with network-proxy/src/proxy.rs. The value is a comma-separated,
 // sorted list of non-zero loopback proxy ports used only when computing the Windows offline
 // sandbox setup marker.
-const WINDOWS_SANDBOX_PROXY_PORTS_ENV_KEY: &str = "CODEX_WINDOWS_SANDBOX_PROXY_PORTS";
+pub(crate) const WINDOWS_SANDBOX_PROXY_PORTS_ENV_KEY: &str = "CODEX_WINDOWS_SANDBOX_PROXY_PORTS";
 
 pub(crate) fn offline_proxy_settings_from_env(
     env_map: &HashMap<String, String>,
@@ -897,6 +937,16 @@ fn run_setup_exe(
     needs_elevation: bool,
     codex_home: &Path,
 ) -> Result<()> {
+    let setup_executable = find_setup_exe();
+    run_setup_exe_at(payload, needs_elevation, codex_home, &setup_executable)
+}
+
+pub(crate) fn run_setup_exe_at(
+    payload: &ElevationPayload,
+    needs_elevation: bool,
+    codex_home: &Path,
+    setup_executable: &Path,
+) -> Result<()> {
     let payload_json = serde_json::to_string(payload).map_err(|err| {
         failure(
             SetupErrorCode::OrchestratorPayloadSerializeFailed,
@@ -905,14 +955,151 @@ fn run_setup_exe(
     })?;
     let payload_b64 = BASE64_STANDARD.encode(payload_json.as_bytes());
     run_setup_singleflight(payload_b64.clone(), || {
-        run_setup_exe_payload(&payload_b64, needs_elevation, codex_home)
+        run_setup_exe_payload(&payload_b64, needs_elevation, codex_home, setup_executable)
     })
+}
+
+pub(crate) fn run_setup_exe_at_with_policy_lease(
+    payload: &ElevationPayload,
+    needs_elevation: bool,
+    codex_home: &Path,
+    setup_executable: &Path,
+    _policy_lease: &crate::policy_lease::McpConsoleSandboxPolicyLease,
+) -> Result<()> {
+    if payload.policy_namespace != WindowsSandboxPolicyNamespace::McpConsole {
+        anyhow::bail!("standalone setup containment requires the MCP Console policy namespace");
+    }
+    let containment = crate::setup_containment::McpSetupContainmentJob::create()
+        .context("create standalone setup helper containment")?;
+    let parent = crate::setup_containment::current_setup_containment_parent()
+        .context("capture standalone setup parent identity")?;
+    let mut payload = payload.clone();
+    payload.setup_parent_process_id = Some(parent.process_id);
+    payload.setup_parent_creation_time = Some(parent.creation_time);
+    let payload_json = serde_json::to_string(&payload).map_err(|err| {
+        failure(
+            SetupErrorCode::OrchestratorPayloadSerializeFailed,
+            format!("failed to serialize elevation payload: {err}"),
+        )
+    })?;
+    let payload_b64 = BASE64_STANDARD.encode(payload_json.as_bytes());
+    let setup_result =
+        run_setup_exe_payload(&payload_b64, needs_elevation, codex_home, setup_executable);
+    let retirement_result = containment.retire_remaining();
+    match (setup_result, retirement_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), Err(error)) => Err(error).context("retire standalone Windows setup helper tree"),
+        (Err(error), Err(retirement_error)) => Err(error).context(format!(
+            "standalone Windows setup helper cleanup also failed: {retirement_error:#}"
+        )),
+    }
+}
+
+pub(crate) fn run_setup_network_verification_exe_at_with_policy_lease(
+    payload: &ElevationPayload,
+    setup_executable: &Path,
+    _policy_lease: &crate::policy_lease::McpConsoleSandboxPolicyLease,
+) -> Result<()> {
+    let payload_json = serde_json::to_string(payload).map_err(|err| {
+        failure(
+            SetupErrorCode::OrchestratorPayloadSerializeFailed,
+            format!("failed to serialize firewall verification payload: {err}"),
+        )
+    })?;
+    let payload_b64 = BASE64_STANDARD.encode(payload_json.as_bytes());
+    const MAX_VERIFICATION_DIAGNOSTIC_BYTES: usize = 16 * 1024;
+    let mut child = Command::new(setup_executable)
+        .arg(crate::standalone::WINDOWS_SANDBOX_STANDALONE_VERIFY_NETWORK_SWITCH)
+        .arg(payload_b64)
+        .env_clear()
+        .creation_flags(0x08000000) // CREATE_NO_WINDOW
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| {
+            failure(
+                SetupErrorCode::OrchestratorHelperLaunchFailed,
+                format!("failed to launch firewall verification helper: {err}"),
+            )
+        })?;
+    let mut stderr = child.stderr.take().ok_or_else(|| {
+        failure(
+            SetupErrorCode::OrchestratorHelperLaunchFailed,
+            "firewall verification helper stderr was unavailable",
+        )
+    })?;
+    let diagnostic_reader = match std::thread::Builder::new()
+        .name("windows-firewall-verification-stderr".to_string())
+        .spawn(move || -> std::io::Result<(Vec<u8>, bool)> {
+            let mut diagnostic = Vec::new();
+            let mut oversized = false;
+            let mut buffer = [0_u8; 1024];
+            loop {
+                let read = stderr.read(&mut buffer)?;
+                if read == 0 {
+                    break;
+                }
+                let remaining = MAX_VERIFICATION_DIAGNOSTIC_BYTES.saturating_sub(diagnostic.len());
+                diagnostic.extend_from_slice(&buffer[..read.min(remaining)]);
+                oversized |= read > remaining;
+            }
+            Ok((diagnostic, oversized))
+        }) {
+        Ok(reader) => reader,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error).context("start firewall verification diagnostic reader");
+        }
+    };
+    let status = match child.wait() {
+        Ok(status) => status,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = diagnostic_reader.join();
+            return Err(failure(
+                SetupErrorCode::OrchestratorHelperLaunchFailed,
+                format!("wait for firewall verification helper: {error}"),
+            ));
+        }
+    };
+    let (diagnostic, oversized) = diagnostic_reader
+        .join()
+        .map_err(|_| anyhow!("firewall verification diagnostic reader panicked"))??;
+    if oversized {
+        return Err(failure(
+            SetupErrorCode::HelperFirewallRuleVerifyFailed,
+            format!(
+                "firewall verification helper diagnostic exceeded {MAX_VERIFICATION_DIAGNOSTIC_BYTES} bytes"
+            ),
+        ));
+    }
+    if !status.success() {
+        let diagnostic = String::from_utf8_lossy(&diagnostic);
+        let diagnostic = diagnostic.trim();
+        let detail = if diagnostic.is_empty() {
+            format!("verification helper exit {:?}", status.code())
+        } else {
+            diagnostic.to_string()
+        };
+        return Err(failure(
+            SetupErrorCode::HelperFirewallRuleVerifyFailed,
+            format!(
+                "installed Windows sandbox firewall rules do not match the requested policy: {detail}"
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn run_setup_exe_payload(
     payload_b64: &str,
     needs_elevation: bool,
     codex_home: &Path,
+    exe: &Path,
 ) -> Result<()> {
     use windows_sys::Win32::System::Threading::GetExitCodeProcess;
     use windows_sys::Win32::System::Threading::INFINITE;
@@ -921,7 +1108,6 @@ fn run_setup_exe_payload(
     use windows_sys::Win32::UI::Shell::SEE_MASK_NOCLOSEPROCESS;
     use windows_sys::Win32::UI::Shell::SHELLEXECUTEINFOW;
     use windows_sys::Win32::UI::Shell::ShellExecuteExW;
-    let exe = find_setup_exe();
     let cleared_report = match clear_setup_error_report(codex_home) {
         Ok(()) => true,
         Err(err) => {
@@ -936,7 +1122,7 @@ fn run_setup_exe_payload(
     };
 
     if !needs_elevation {
-        let status = Command::new(&exe)
+        let status = Command::new(exe)
             .arg(payload_b64)
             .creation_flags(0x08000000) // CREATE_NO_WINDOW
             .stdin(Stdio::null())
@@ -968,7 +1154,7 @@ fn run_setup_exe_payload(
         return Ok(());
     }
 
-    let exe_w = crate::winutil::to_wide(&exe);
+    let exe_w = crate::winutil::to_wide(exe);
     let params = quote_arg(payload_b64);
     let params_w = crate::winutil::to_wide(params);
     let verb_w = crate::winutil::to_wide("runas");
@@ -1060,6 +1246,7 @@ fn run_elevated_setup_inner(
         version: SETUP_VERSION,
         offline_username: OFFLINE_USERNAME.to_string(),
         online_username: ONLINE_USERNAME.to_string(),
+        policy_namespace: WindowsSandboxPolicyNamespace::Codex,
         codex_home: request.codex_home.to_path_buf(),
         command_cwd: request.command_cwd.to_path_buf(),
         read_roots,
@@ -1069,9 +1256,11 @@ fn run_elevated_setup_inner(
         proxy_ports: offline_proxy_settings.proxy_ports,
         allow_local_binding: offline_proxy_settings.allow_local_binding,
         real_user: std::env::var("USERNAME").unwrap_or_else(|_| "Administrators".to_string()),
-        otel: codex_otel::global_statsig_metrics_settings(),
+        otel: global_statsig_metrics_settings(),
         mode: SetupMode::Full,
         refresh_only: false,
+        setup_parent_process_id: None,
+        setup_parent_creation_time: None,
     };
     let needs_elevation = !is_elevated().map_err(|err| {
         failure(
@@ -1127,6 +1316,7 @@ pub fn run_elevated_provisioning_setup(
         version: SETUP_VERSION,
         offline_username: OFFLINE_USERNAME.to_string(),
         online_username: ONLINE_USERNAME.to_string(),
+        policy_namespace: WindowsSandboxPolicyNamespace::Codex,
         codex_home: codex_home.to_path_buf(),
         command_cwd: codex_home.to_path_buf(),
         read_roots: Vec::new(),
@@ -1135,15 +1325,17 @@ pub fn run_elevated_provisioning_setup(
         deny_write_paths: Vec::new(),
         proxy_ports: settings.proxy_ports,
         allow_local_binding: settings.allow_local_binding,
-        otel: codex_otel::global_statsig_metrics_settings(),
+        otel: global_statsig_metrics_settings(),
         real_user: real_user.to_string(),
         mode: SetupMode::ProvisionOnly,
         refresh_only: false,
+        setup_parent_process_id: None,
+        setup_parent_creation_time: None,
     };
     run_setup_exe(&payload, /*needs_elevation*/ false, codex_home)
 }
 
-fn build_payload_roots(
+pub(crate) fn build_payload_roots(
     request: &SandboxSetupRequest<'_>,
     overrides: &SetupRootOverrides,
 ) -> (Vec<PathBuf>, Vec<PathBuf>) {
@@ -1202,7 +1394,7 @@ fn build_payload_roots(
     (read_roots, write_roots)
 }
 
-fn build_payload_deny_write_paths(
+pub(crate) fn build_payload_deny_write_paths(
     request: &SandboxSetupRequest<'_>,
     explicit_deny_write_paths: Option<Vec<PathBuf>>,
 ) -> Vec<PathBuf> {
@@ -1841,6 +2033,7 @@ mod tests {
             version: super::SETUP_VERSION,
             offline_username: "offline".to_string(),
             online_username: "online".to_string(),
+            policy_namespace: crate::policy_namespace::WindowsSandboxPolicyNamespace::Codex,
             created_at: None,
             proxy_ports: vec![3128],
             allow_local_binding: false,
@@ -1862,6 +2055,7 @@ mod tests {
             version: super::SETUP_VERSION,
             offline_username: "offline".to_string(),
             online_username: "online".to_string(),
+            policy_namespace: crate::policy_namespace::WindowsSandboxPolicyNamespace::Codex,
             created_at: None,
             proxy_ports: vec![3128],
             allow_local_binding: false,
@@ -1876,6 +2070,47 @@ mod tests {
             Some(
                 "offline firewall settings changed (stored_ports=[3128], desired_ports=[1081, 8080], stored_allow_local_binding=false, desired_allow_local_binding=true)"
                     .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn persisted_identity_state_must_match_the_exact_policy_namespace() {
+        let marker = super::SetupMarker {
+            version: super::SETUP_VERSION,
+            offline_username: super::OFFLINE_USERNAME.to_string(),
+            online_username: super::ONLINE_USERNAME.to_string(),
+            policy_namespace: crate::policy_namespace::WindowsSandboxPolicyNamespace::Codex,
+            created_at: None,
+            proxy_ports: Vec::new(),
+            allow_local_binding: false,
+        };
+        let users = super::SandboxUsersFile {
+            version: super::SETUP_VERSION,
+            offline: super::SandboxUserRecord {
+                username: super::OFFLINE_USERNAME.to_string(),
+                password: String::new(),
+            },
+            online: super::SandboxUserRecord {
+                username: super::ONLINE_USERNAME.to_string(),
+                password: String::new(),
+            },
+        };
+
+        assert!(
+            marker.identities_match(crate::policy_namespace::WindowsSandboxPolicyNamespace::Codex)
+        );
+        assert!(
+            users.identities_match(crate::policy_namespace::WindowsSandboxPolicyNamespace::Codex)
+        );
+        assert!(
+            !marker.identities_match(
+                crate::policy_namespace::WindowsSandboxPolicyNamespace::McpConsole
+            )
+        );
+        assert!(
+            !users.identities_match(
+                crate::policy_namespace::WindowsSandboxPolicyNamespace::McpConsole
             )
         );
     }

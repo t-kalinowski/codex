@@ -19,6 +19,7 @@ codex_rust_crate(
         ],
         "//conditions:default": [],
     }),
+    rustc_env = {"CARGO_PKG_VERSION": "{STABLE_CODEX_WORKSPACE_VERSION}"},
 )
 
 genrule(

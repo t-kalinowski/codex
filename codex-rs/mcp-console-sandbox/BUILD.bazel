@@ -1,0 +1,46 @@
+load("@crates//:defs.bzl", "all_crate_deps")
+load("//:defs.bzl", "codex_rust_crate")
+
+RUNNER_LOCAL_DEPS = [
+    "//codex-rs/network-proxy",
+    "//codex-rs/protocol",
+    "//codex-rs/sandboxing:sandboxing-no-windows-telemetry",
+    "//codex-rs/utils/absolute-path",
+    "//codex-rs/utils/pty",
+] + select({
+    "@platforms//os:linux": ["//codex-rs/linux-sandbox:linux-sandbox-no-windows-telemetry"],
+    "@platforms//os:windows": ["//codex-rs/windows-sandbox-rs:windows-sandbox-rs-no-telemetry"],
+    "//conditions:default": [],
+})
+
+RUNNER_DEPS = all_crate_deps(cargo_only = True) + RUNNER_LOCAL_DEPS
+
+RUNNER_TEST_DEPS = all_crate_deps(
+    cargo_only = True,
+    normal = True,
+    normal_dev = True,
+) + RUNNER_LOCAL_DEPS + ["//codex-rs/utils/cargo-bin"]
+
+codex_rust_crate(
+    name = "mcp-console-sandbox-lib",
+    build_script_env = {"MCP_CONSOLE_SANDBOX_BAZEL_BUILD": "1"},
+    crate_name = "codex_mcp_console_sandbox",
+    deps_override = RUNNER_DEPS,
+    extra_binaries = [
+        "//codex-rs/bwrap:bwrap",
+        "//codex-rs/windows-sandbox-rs/no-telemetry:codex-command-runner",
+        "//codex-rs/windows-sandbox-rs/no-telemetry:codex-windows-sandbox-setup",
+    ],
+    lib_stamp = 1,
+    rustc_env = {"CARGO_PKG_VERSION": "{STABLE_CODEX_WORKSPACE_VERSION}"},
+    test_deps_override = RUNNER_TEST_DEPS,
+    # These tests build the final runner binary, whose exact source revision is
+    # supplied by the focused workspace-status configuration. Keep wildcard
+    # Bazel test invocations from compiling an unstamped executable; the
+    # dedicated workflow validates the configured target and Cargo runs the
+    # native executable contract suite.
+    test_tags = [
+        "manual",
+        "no-sandbox",
+    ],
+)

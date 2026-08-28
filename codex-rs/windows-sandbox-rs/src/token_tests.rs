@@ -44,6 +44,38 @@ unsafe fn token_has_restricting_sid(token: HANDLE, expected_sid: *mut c_void) ->
         .any(|entry| EqualSid(entry.Sid, expected_sid) != 0))
 }
 
+unsafe fn token_restricting_sid_count(token: HANDLE) -> Result<usize> {
+    let mut needed = 0;
+    GetTokenInformation(
+        token,
+        TokenRestrictedSids,
+        std::ptr::null_mut(),
+        0,
+        &mut needed,
+    );
+    if needed == 0 {
+        return Err(anyhow!(
+            "GetTokenInformation(TokenRestrictedSids) size query failed: {}",
+            GetLastError()
+        ));
+    }
+    let mut buffer = vec![0_u8; needed as usize];
+    if GetTokenInformation(
+        token,
+        TokenRestrictedSids,
+        buffer.as_mut_ptr().cast(),
+        needed,
+        &mut needed,
+    ) == 0
+    {
+        return Err(anyhow!(
+            "GetTokenInformation(TokenRestrictedSids) failed: {}",
+            GetLastError()
+        ));
+    }
+    Ok(std::ptr::read_unaligned(buffer.as_ptr().cast::<u32>()) as usize)
+}
+
 #[test]
 fn elevated_token_includes_network_proxy_restricting_sid() -> Result<()> {
     let capability_sid = LocalSid::from_string("S-1-5-21-10-20-30-40")?;
@@ -65,5 +97,36 @@ fn elevated_token_includes_network_proxy_restricting_sid() -> Result<()> {
     }
 
     assert!(has_network_proxy_sid?);
+    Ok(())
+}
+
+#[test]
+fn standalone_token_restricts_authority_to_capabilities_and_network_identity() -> Result<()> {
+    let capability_sid = LocalSid::from_string("S-1-5-21-10-20-30-40")?;
+    let network_proxy_sid = LocalSid::from_string("S-1-5-21-50-60-70-80")?;
+    let base_token = unsafe { get_current_token_for_restriction()? };
+    let mut world_sid = unsafe { world_sid()? };
+    let restricted_token = unsafe {
+        create_standalone_token_with_caps_from(
+            base_token,
+            &[capability_sid.as_ptr()],
+            &[network_proxy_sid.as_ptr()],
+        )?
+    };
+
+    let result = unsafe {
+        (
+            token_restricting_sid_count(restricted_token)?,
+            token_has_restricting_sid(restricted_token, capability_sid.as_ptr())?,
+            token_has_restricting_sid(restricted_token, network_proxy_sid.as_ptr())?,
+            token_has_restricting_sid(restricted_token, world_sid.as_mut_ptr().cast())?,
+        )
+    };
+    unsafe {
+        CloseHandle(restricted_token);
+        CloseHandle(base_token);
+    }
+
+    assert_eq!(result, (2, true, true, false));
     Ok(())
 }

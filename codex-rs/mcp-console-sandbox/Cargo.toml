@@ -1,0 +1,71 @@
+[package]
+name = "codex-mcp-console-sandbox"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+build = "build.rs"
+
+[lib]
+name = "codex_mcp_console_sandbox"
+path = "src/lib.rs"
+doctest = false
+
+[[bin]]
+name = "mcp-console-sandbox"
+path = "src/main.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "mcp-console-sandbox-fixture"
+path = "src/bin/mcp_console_sandbox_fixture.rs"
+test = false
+bench = false
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
+codex-network-proxy = { workspace = true }
+codex-protocol = { workspace = true }
+codex-sandboxing = { path = "../sandboxing", default-features = false }
+codex-utils-absolute-path = { workspace = true }
+codex-utils-pty = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "process", "rt-multi-thread", "signal", "sync", "time"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+codex-linux-sandbox = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+codex-windows-sandbox = { path = "../windows-sandbox-rs", default-features = false }
+windows-sys = { version = "0.52", features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_WindowsFilteringPlatform",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Console",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+codex-utils-cargo-bin = { workspace = true }
+pretty_assertions = { workspace = true }
+tempfile = { workspace = true }
+
+[target.'cfg(windows)'.dev-dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_WindowsFirewall",
+    "Win32_System_Com",
+] }

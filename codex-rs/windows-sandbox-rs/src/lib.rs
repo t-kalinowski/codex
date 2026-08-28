@@ -46,6 +46,17 @@ pub struct WindowsSandboxProvisioningSettings {
     pub allow_local_binding: bool,
 }
 
+#[cfg(all(target_os = "windows", feature = "telemetry"))]
+#[doc(hidden)]
+pub type WindowsSandboxStatsigMetricsSettings = codex_otel::StatsigMetricsSettings;
+
+#[cfg(all(target_os = "windows", not(feature = "telemetry")))]
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct WindowsSandboxStatsigMetricsSettings {
+    pub environment: String,
+}
+
 #[cfg(target_os = "windows")]
 mod acl;
 #[cfg(target_os = "windows")]
@@ -75,6 +86,10 @@ mod logging;
 #[cfg(target_os = "windows")]
 mod path_normalization;
 #[cfg(target_os = "windows")]
+mod policy_lease;
+#[cfg(target_os = "windows")]
+mod policy_namespace;
+#[cfg(target_os = "windows")]
 mod process;
 #[cfg(target_os = "windows")]
 mod resolved_permissions;
@@ -82,7 +97,10 @@ mod resolved_permissions;
 mod token;
 #[cfg(target_os = "windows")]
 mod wfp;
-#[cfg(target_os = "windows")]
+#[cfg(all(target_os = "windows", feature = "telemetry"))]
+mod wfp_setup;
+#[cfg(all(target_os = "windows", not(feature = "telemetry")))]
+#[path = "wfp_setup_no_telemetry.rs"]
 mod wfp_setup;
 #[cfg(target_os = "windows")]
 mod winutil;
@@ -113,10 +131,24 @@ mod setup;
 mod setup_error;
 
 #[cfg(target_os = "windows")]
+mod setup_containment;
+
+#[cfg(target_os = "windows")]
 mod spawn_prep;
 
 #[cfg(target_os = "windows")]
 mod stdio_bridge;
+
+#[cfg(target_os = "windows")]
+mod standalone;
+
+#[cfg(all(target_os = "windows", test))]
+#[path = "standalone_tests.rs"]
+mod standalone_tests;
+
+#[cfg(all(target_os = "windows", test))]
+#[path = "policy_namespace_tests.rs"]
+mod policy_namespace_tests;
 
 #[cfg(target_os = "windows")]
 mod unified_exec;
@@ -239,6 +271,9 @@ pub use logging::log_writer;
 #[cfg(target_os = "windows")]
 pub use path_normalization::canonicalize_path;
 #[cfg(target_os = "windows")]
+#[doc(hidden)]
+pub use policy_namespace::WindowsSandboxPolicyNamespace;
+#[cfg(target_os = "windows")]
 pub use process::ConsoleMode;
 #[cfg(target_os = "windows")]
 pub use process::PipeSpawnHandles;
@@ -283,6 +318,9 @@ pub use setup::sandbox_dir;
 #[cfg(target_os = "windows")]
 pub use setup::sandbox_secrets_dir;
 #[cfg(target_os = "windows")]
+#[doc(hidden)]
+pub use setup_containment::enroll_current_process_in_mcp_setup_job;
+#[cfg(target_os = "windows")]
 pub use setup_error::SetupErrorCode;
 #[cfg(target_os = "windows")]
 pub use setup_error::SetupErrorReport;
@@ -298,6 +336,69 @@ pub use setup_error::sanitize_setup_metric_tag_value;
 pub use setup_error::setup_error_path;
 #[cfg(target_os = "windows")]
 pub use setup_error::write_setup_error_report;
+#[cfg(target_os = "windows")]
+#[doc(hidden)]
+pub use standalone::WINDOWS_SANDBOX_STANDALONE_VERIFY_NETWORK_SWITCH;
+#[cfg(target_os = "windows")]
+pub use standalone::WindowsSandboxStandaloneCommand;
+#[cfg(target_os = "windows")]
+pub use standalone::WindowsSandboxStandaloneFilesystemOverrides;
+#[cfg(target_os = "windows")]
+#[doc(hidden)]
+pub use standalone::WindowsSandboxStandaloneHelperKind;
+#[cfg(target_os = "windows")]
+pub use standalone::WindowsSandboxStandaloneLaunchRequest;
+#[cfg(target_os = "windows")]
+pub use standalone::WindowsSandboxStandaloneNetworkIdentity;
+#[cfg(target_os = "windows")]
+pub use standalone::WindowsSandboxStandaloneNetworkSetup;
+#[cfg(target_os = "windows")]
+pub use standalone::WindowsSandboxStandaloneOutcome;
+#[cfg(target_os = "windows")]
+pub use standalone::WindowsSandboxStandalonePolicyRequest;
+#[cfg(target_os = "windows")]
+pub use standalone::WindowsSandboxStandaloneProcess;
+#[cfg(target_os = "windows")]
+pub use standalone::WindowsSandboxStandaloneResources;
+#[cfg(target_os = "windows")]
+pub use standalone::WindowsSandboxStandaloneRetirementOutcome;
+#[cfg(target_os = "windows")]
+pub use standalone::WindowsSandboxStandaloneRootOutcome;
+#[cfg(target_os = "windows")]
+pub use standalone::WindowsSandboxStandaloneSetupOperation;
+#[cfg(target_os = "windows")]
+pub use standalone::WindowsSandboxStandaloneSetupRequest;
+#[cfg(target_os = "windows")]
+pub use standalone::WindowsSandboxStandaloneSetupState;
+#[cfg(target_os = "windows")]
+pub use standalone::WindowsSandboxStandaloneStdio;
+#[cfg(target_os = "windows")]
+pub use standalone::WindowsSandboxStandaloneStream;
+#[cfg(target_os = "windows")]
+#[doc(hidden)]
+pub use standalone::is_windows_sandbox_standalone_helper_invocation;
+#[cfg(target_os = "windows")]
+pub use standalone::is_windows_sandbox_standalone_setup_only_environment_variable;
+#[cfg(target_os = "windows")]
+pub use standalone::prepare_windows_sandbox_standalone;
+#[cfg(target_os = "windows")]
+pub use standalone::refresh_windows_sandbox_standalone;
+#[cfg(target_os = "windows")]
+#[doc(hidden)]
+pub use standalone::run_windows_sandbox_standalone_helper;
+#[cfg(target_os = "windows")]
+pub use standalone::spawn_windows_sandbox_standalone;
+#[cfg(target_os = "windows")]
+pub use standalone::verify_windows_sandbox_standalone_resources;
+#[cfg(target_os = "windows")]
+#[doc(hidden)]
+pub use standalone::windows_sandbox_standalone_helper_compatibility_response;
+#[cfg(target_os = "windows")]
+pub use standalone::windows_sandbox_standalone_setup_request_from_permission_profile;
+#[cfg(target_os = "windows")]
+pub use standalone::windows_sandbox_standalone_setup_status;
+#[cfg(target_os = "windows")]
+pub use standalone::windows_sandbox_standalone_verified_setup_status;
 #[cfg(target_os = "windows")]
 pub use stdio_bridge::forward_sandbox_session_stdio;
 #[cfg(target_os = "windows")]
@@ -328,7 +429,16 @@ pub use unified_exec::spawn_windows_sandbox_session_legacy;
 #[cfg(target_os = "windows")]
 pub use wfp::install_wfp_filters_for_account;
 #[cfg(target_os = "windows")]
+#[doc(hidden)]
+pub use wfp::install_wfp_filters_for_account_in_namespace;
+#[cfg(target_os = "windows")]
+#[doc(hidden)]
+pub use wfp::verify_wfp_filters_for_account_in_namespace;
+#[cfg(target_os = "windows")]
 pub use wfp_setup::install_wfp_filters;
+#[cfg(target_os = "windows")]
+#[doc(hidden)]
+pub use wfp_setup::install_wfp_filters_in_namespace;
 #[cfg(target_os = "windows")]
 pub use windows_impl::CaptureResult;
 #[cfg(target_os = "windows")]
