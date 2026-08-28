@@ -1,4 +1,5 @@
 use anyhow::Result;
+use codex_windows_sandbox::WindowsSandboxPolicyNamespace;
 use codex_windows_sandbox::to_wide;
 use std::ffi::OsStr;
 use windows_sys::Win32::Foundation::CloseHandle;
@@ -10,8 +11,6 @@ use windows_sys::Win32::System::Threading::CreateMutexW;
 use windows_sys::Win32::System::Threading::MUTEX_ALL_ACCESS;
 use windows_sys::Win32::System::Threading::OpenMutexW;
 use windows_sys::Win32::System::Threading::ReleaseMutex;
-
-const READ_ACL_MUTEX_NAME: &str = "Local\\CodexSandboxReadAcl";
 
 pub(super) struct ReadAclMutexGuard {
     handle: HANDLE,
@@ -26,8 +25,8 @@ impl Drop for ReadAclMutexGuard {
     }
 }
 
-pub(super) fn read_acl_mutex_exists() -> Result<bool> {
-    let name = to_wide(OsStr::new(READ_ACL_MUTEX_NAME));
+pub(super) fn read_acl_mutex_exists(namespace: WindowsSandboxPolicyNamespace) -> Result<bool> {
+    let name = to_wide(OsStr::new(namespace.read_acl_mutex_name()));
     let handle = unsafe { OpenMutexW(MUTEX_ALL_ACCESS, 0, name.as_ptr()) };
     if handle == 0 {
         let err = unsafe { GetLastError() };
@@ -42,8 +41,10 @@ pub(super) fn read_acl_mutex_exists() -> Result<bool> {
     Ok(true)
 }
 
-pub(super) fn acquire_read_acl_mutex() -> Result<Option<ReadAclMutexGuard>> {
-    let name = to_wide(OsStr::new(READ_ACL_MUTEX_NAME));
+pub(super) fn acquire_read_acl_mutex(
+    namespace: WindowsSandboxPolicyNamespace,
+) -> Result<Option<ReadAclMutexGuard>> {
+    let name = to_wide(OsStr::new(namespace.read_acl_mutex_name()));
     let handle = unsafe { CreateMutexW(std::ptr::null_mut(), 1, name.as_ptr()) };
     if handle == 0 {
         return Err(anyhow::anyhow!("CreateMutexW failed: {}", unsafe {

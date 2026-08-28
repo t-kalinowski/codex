@@ -40,7 +40,7 @@ use windows_sys::Win32::System::StationsAndDesktops::DESKTOP_WRITE_DAC;
 use windows_sys::Win32::System::StationsAndDesktops::DESKTOP_WRITE_OWNER;
 use windows_sys::Win32::System::StationsAndDesktops::DESKTOP_WRITEOBJECTS;
 
-const DESKTOP_ALL_ACCESS: u32 = DESKTOP_READOBJECTS
+pub(crate) const DESKTOP_ALL_ACCESS: u32 = DESKTOP_READOBJECTS
     | DESKTOP_CREATEWINDOW
     | DESKTOP_CREATEMENU
     | DESKTOP_HOOKCONTROL

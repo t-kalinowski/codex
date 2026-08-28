@@ -9,7 +9,21 @@ fn main() {
         fn bwrap_main(argc: libc::c_int, argv: *const *const c_char) -> libc::c_int;
     }
 
-    let cstrings = std::env::args_os()
+    const COMPATIBILITY_QUERY: &str = "--codex-mcp-console-sandbox-bwrap-compatibility-v2";
+    const COMPATIBILITY_RESPONSE: &str = concat!(
+        "mcp-console-sandbox-bwrap/2 codex/",
+        env!("CARGO_PKG_VERSION"),
+        "\n"
+    );
+
+    let args = std::env::args_os().collect::<Vec<_>>();
+    if args.len() == 2 && args[1] == COMPATIBILITY_QUERY {
+        print!("{COMPATIBILITY_RESPONSE}");
+        return;
+    }
+
+    let cstrings = args
+        .into_iter()
         .map(|arg| {
             CString::new(arg.as_os_str().as_bytes())
                 .unwrap_or_else(|err| panic!("failed to convert argv to CString: {err}"))
