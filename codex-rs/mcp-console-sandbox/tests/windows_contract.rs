@@ -28,6 +28,7 @@ use windows_support::OutputPipe;
 use windows_support::Runner;
 use windows_support::RunnerExecutable;
 use windows_support::delete_one_standalone_wfp_filter;
+use windows_support::hold_standalone_read_acl_mutex;
 use windows_support::native_tests_enabled;
 use windows_support::open_process_for_wait;
 use windows_support::run_bootstrap;
@@ -1040,6 +1041,58 @@ fn setup_detects_credentials_rotated_by_another_state_directory() {
         "launch_accepted"
     );
     assert_successful_outcome(&runner_a.request(wait_request(5)), 0);
+}
+
+#[test]
+fn read_acl_contention_fails_before_target_start() {
+    if !native_tests_enabled() {
+        return;
+    }
+
+    let executable = RunnerExecutable::with_companions();
+    let root = TempDir::new().expect("policy root");
+    let workspace = root.path().join("workspace");
+    let state = root.path().join("state");
+    std::fs::create_dir(&workspace).expect("workspace directory");
+    std::fs::create_dir(&state).expect("state directory");
+    let marker = workspace.join("target-started");
+    let fixture = cargo_bin("mcp-console-sandbox-fixture").expect("fixture binary");
+    let target = vec![
+        fixture.as_os_str().to_owned(),
+        OsString::from("write"),
+        marker.as_os_str().to_owned(),
+        OsString::from("started"),
+    ];
+    let rules = json!([{
+        "path": workspace,
+        "access": "write",
+        "missing": "error",
+    }]);
+    let _read_acl_mutex = hold_standalone_read_acl_mutex();
+    let mut runner = Runner::spawn(&executable, &state, &target);
+
+    let setup = runner.request(setup_operation_with_policy(
+        1,
+        "prepare",
+        &workspace,
+        rules.clone(),
+        json!({ "mode": "denied" }),
+    ));
+    assert_eq!(setup["type"], "error", "{setup}");
+    assert_eq!(setup["error"]["code"], "setup_failed", "{setup}");
+    assert_eq!(setup["error"]["target_started"], false, "{setup}");
+
+    let launch = runner.request(launch_request_with_policy(
+        2,
+        &workspace,
+        rules,
+        json!({ "mode": "denied" }),
+        null_streams(),
+    ));
+    assert_eq!(launch["type"], "error", "{launch}");
+    assert_eq!(launch["error"]["code"], "setup_failed", "{launch}");
+    assert_eq!(launch["error"]["target_started"], false, "{launch}");
+    assert!(!marker.exists());
 }
 
 #[test]
@@ -2731,7 +2784,7 @@ fn setup_request_with_policy(
         "working_directory": working_directory,
         "policy_base_directory": working_directory,
         "filesystem": {
-            "base": "platform_minimal",
+            "base": "host_read_only",
             "rules": filesystem_rules,
         },
         "network": network,
@@ -2790,7 +2843,7 @@ fn launch_request_with_policy(
             "working_directory": working_directory,
             "policy_base_directory": working_directory,
             "filesystem": {
-                "base": "platform_minimal",
+                "base": "host_read_only",
                 "rules": filesystem_rules,
             },
             "network": network,

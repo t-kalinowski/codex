@@ -24,6 +24,7 @@ use std::time::Duration;
 use tempfile::TempDir;
 use windows_sys::Win32::Foundation::DUPLICATE_CLOSE_SOURCE;
 use windows_sys::Win32::Foundation::DUPLICATE_SAME_ACCESS;
+use windows_sys::Win32::Foundation::CloseHandle;
 use windows_sys::Win32::Foundation::DuplicateHandle;
 use windows_sys::Win32::Foundation::ERROR_PIPE_CONNECTED;
 use windows_sys::Win32::Foundation::GetLastError;
@@ -45,10 +46,12 @@ use windows_sys::Win32::System::Pipes::PIPE_READMODE_BYTE;
 use windows_sys::Win32::System::Pipes::PIPE_TYPE_BYTE;
 use windows_sys::Win32::System::Pipes::PIPE_WAIT;
 use windows_sys::Win32::System::Threading::CreateProcessW;
+use windows_sys::Win32::System::Threading::CreateMutexW;
 use windows_sys::Win32::System::Threading::GetCurrentProcess;
 use windows_sys::Win32::System::Threading::OpenProcess;
 use windows_sys::Win32::System::Threading::PROCESS_INFORMATION;
 use windows_sys::Win32::System::Threading::PROCESS_SYNCHRONIZE;
+use windows_sys::Win32::System::Threading::ReleaseMutex;
 use windows_sys::Win32::System::Threading::STARTF_USESTDHANDLES;
 use windows_sys::Win32::System::Threading::STARTUPINFOW;
 use windows_sys::Win32::System::Threading::TerminateProcess;
@@ -518,6 +521,33 @@ pub fn delete_one_standalone_wfp_filter() {
     let closed = unsafe { FwpmEngineClose0(engine) };
     assert_eq!(deleted, 0, "delete standalone WFP filter: {deleted:#x}");
     assert_eq!(closed, 0, "close WFP engine: {closed:#x}");
+}
+
+pub struct ReadAclMutexGuard(HANDLE);
+
+impl Drop for ReadAclMutexGuard {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = ReleaseMutex(self.0);
+            CloseHandle(self.0);
+        }
+    }
+}
+
+pub fn hold_standalone_read_acl_mutex() -> ReadAclMutexGuard {
+    let namespace = codex_windows_sandbox::WindowsSandboxPolicyNamespace::McpConsole;
+    let name = std::ffi::OsStr::new(namespace.read_acl_mutex_name())
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let handle = unsafe { CreateMutexW(std::ptr::null(), 1, name.as_ptr()) };
+    assert_ne!(
+        handle,
+        0,
+        "create standalone read ACL mutex: {}",
+        std::io::Error::last_os_error()
+    );
+    ReadAclMutexGuard(handle)
 }
 
 pub struct AliasedRunner {
