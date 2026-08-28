@@ -184,6 +184,30 @@ impl JobObject {
         Ok(child)
     }
 
+    /// Assigns and resumes a child created suspended with [`std::process::Command`].
+    ///
+    /// Assignment failure terminates the suspended child rather than allowing
+    /// it to run outside this Job Object.
+    pub fn assign_and_resume_std_process(&self, child: &mut std::process::Child) -> io::Result<()> {
+        let process_handle = child.as_raw_handle();
+        if let Err(error) = self.assign_process(process_handle) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+
+        let status = unsafe { NtResumeProcess(process_handle.cast()) };
+        if !NT_SUCCESS(status) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(io::Error::other(format!(
+                "failed to resume contained process: NTSTATUS {status:#x}"
+            )));
+        }
+
+        Ok(())
+    }
+
     /// Allows contained descendants to keep running after the root exits normally.
     ///
     /// This disables both explicit job termination and kill-on-close for this

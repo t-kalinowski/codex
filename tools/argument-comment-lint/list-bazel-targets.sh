@@ -12,7 +12,7 @@ cd "${repo_root}"
 manual_rust_test_targets="$(
   ./.github/scripts/run-bazel-query-ci.sh \
     --output=label \
-    -- 'kind("rust_test rule", attr(tags, "manual", //codex-rs/...))'
+    -- 'kind("rust_test rule", attr(tags, "manual", //codex-rs/...) except attr(tags, "mcp-console-sandbox-config-required", //codex-rs/...))'
 )"
 if [[ "${RUNNER_OS:-}" != "Windows" ]]; then
   manual_rust_test_targets="$(printf '%s\n' "${manual_rust_test_targets}" | grep -v -- '-windows-cross-bin$' || true)"

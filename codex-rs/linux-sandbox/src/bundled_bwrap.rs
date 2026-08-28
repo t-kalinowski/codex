@@ -1,13 +1,21 @@
 use std::ffi::CStr;
 use std::ffi::CString;
+use std::ffi::OsString;
 use std::fs::File;
 use std::io::Read;
 use std::os::fd::AsRawFd;
 use std::os::raw::c_char;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::path::PathBuf;
+use std::process::Child;
+use std::process::Command;
+use std::process::Stdio;
 use std::sync::OnceLock;
+use std::thread;
+use std::time::Duration;
+use std::time::Instant;
 
 use crate::bazel_bwrap;
 use crate::exec_util::argv_to_cstrings;
@@ -19,10 +27,24 @@ use sha2::Sha256;
 
 const SHA256_HEX_LEN: usize = 64;
 const NULL_SHA256_DIGEST: [u8; 32] = [0; 32];
+const COMPATIBILITY_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_COMPATIBILITY_OUTPUT_BYTES: usize = 1024;
+pub(crate) const COMPATIBILITY_QUERY: &str = "--codex-mcp-console-sandbox-bwrap-compatibility-v2";
+pub(crate) const COMPATIBILITY_RESPONSE: &str = concat!(
+    "mcp-console-sandbox-bwrap/2 codex/",
+    env!("CARGO_PKG_VERSION"),
+    "\n"
+);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BundledBwrapLauncher {
     program: AbsolutePathBuf,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum ExecVerification {
+    DigestOnly,
+    DigestAndPrivateCompatibility,
 }
 
 pub(crate) fn launcher() -> Option<BundledBwrapLauncher> {
@@ -32,8 +54,37 @@ pub(crate) fn launcher() -> Option<BundledBwrapLauncher> {
         .map(|program| BundledBwrapLauncher { program })
 }
 
+pub(crate) fn launcher_for_program(program: &Path) -> Option<BundledBwrapLauncher> {
+    if !is_executable_file(program) {
+        return None;
+    }
+    AbsolutePathBuf::from_absolute_path(program)
+        .ok()
+        .map(|program| BundledBwrapLauncher { program })
+}
+
 impl BundledBwrapLauncher {
-    pub(crate) fn exec(&self, argv: Vec<String>, preserved_files: Vec<File>) -> ! {
+    pub(crate) fn program(&self) -> &Path {
+        self.program.as_path()
+    }
+
+    pub(crate) fn verify(&self) -> Result<(), String> {
+        let file = File::open(self.program.as_path()).map_err(|err| {
+            format!(
+                "failed to open packaged bubblewrap {}: {err}",
+                self.program.as_path().display()
+            )
+        })?;
+        verify_digest(&file, expected_sha256(), self.program.as_path())?;
+        verify_compatibility(self.program.as_path())
+    }
+
+    pub(crate) fn exec(
+        &self,
+        verification: ExecVerification,
+        argv: Vec<OsString>,
+        preserved_files: Vec<File>,
+    ) -> ! {
         let bwrap_file = File::open(self.program.as_path()).unwrap_or_else(|err| {
             panic!(
                 "failed to open bundled bubblewrap {}: {err}",
@@ -41,6 +92,14 @@ impl BundledBwrapLauncher {
             )
         });
         if let Err(err) = verify_digest(&bwrap_file, expected_sha256(), self.program.as_path()) {
+            eprintln!("{err}");
+            std::process::exit(crate::BUNDLED_BWRAP_DIGEST_VERIFICATION_FAILURE_EXIT_CODE);
+        }
+        if matches!(
+            verification,
+            ExecVerification::DigestAndPrivateCompatibility
+        ) && let Err(err) = verify_compatibility(self.program.as_path())
+        {
             eprintln!("{err}");
             std::process::exit(crate::BUNDLED_BWRAP_DIGEST_VERIFICATION_FAILURE_EXIT_CODE);
         }
@@ -69,6 +128,149 @@ impl BundledBwrapLauncher {
             self.program.as_path().display()
         );
     }
+}
+
+fn verify_compatibility(program: &Path) -> Result<(), String> {
+    let mut command = Command::new(program);
+    command
+        .arg(COMPATIBILITY_QUERY)
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0);
+    let mut child = command.spawn().map_err(|err| {
+        format!(
+            "failed to query packaged bubblewrap compatibility for {}: {err}",
+            program.display()
+        )
+    })?;
+    let Some(mut stdout) = child.stdout.take() else {
+        terminate_query(&mut child);
+        return Err("packaged bubblewrap compatibility stdout was unavailable".to_string());
+    };
+    let Some(mut stderr) = child.stderr.take() else {
+        terminate_query(&mut child);
+        return Err("packaged bubblewrap compatibility stderr was unavailable".to_string());
+    };
+    if let Err(err) =
+        set_nonblocking(stdout.as_raw_fd()).and_then(|()| set_nonblocking(stderr.as_raw_fd()))
+    {
+        terminate_query(&mut child);
+        return Err(err);
+    }
+
+    let deadline = Instant::now() + COMPATIBILITY_QUERY_TIMEOUT;
+    let mut stdout_bytes = Vec::new();
+    let mut stderr_bytes = Vec::new();
+    let mut stdout_eof = false;
+    let mut stderr_eof = false;
+    let mut status = None;
+    loop {
+        if let Err(err) = read_bounded(&mut stdout, &mut stdout_bytes, &mut stdout_eof)
+            .and_then(|()| read_bounded(&mut stderr, &mut stderr_bytes, &mut stderr_eof))
+        {
+            terminate_query(&mut child);
+            return Err(err);
+        }
+        if stdout_bytes.len() > MAX_COMPATIBILITY_OUTPUT_BYTES
+            || stderr_bytes.len() > MAX_COMPATIBILITY_OUTPUT_BYTES
+        {
+            terminate_query(&mut child);
+            return Err(format!(
+                "packaged bubblewrap compatibility output exceeded {MAX_COMPATIBILITY_OUTPUT_BYTES} bytes"
+            ));
+        }
+        if status.is_none() {
+            match child.try_wait() {
+                Ok(result) => status = result,
+                Err(err) => {
+                    terminate_query(&mut child);
+                    return Err(format!(
+                        "failed to inspect packaged bubblewrap compatibility query: {err}"
+                    ));
+                }
+            }
+        }
+        if status.is_some() && stdout_eof && stderr_eof {
+            break;
+        }
+        if Instant::now() >= deadline {
+            terminate_query(&mut child);
+            return Err("packaged bubblewrap compatibility query timed out".to_string());
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+
+    let Some(status) = status else {
+        return Err("completed compatibility query has no exit status".to_string());
+    };
+    if !status.success()
+        || stdout_bytes.as_slice() != COMPATIBILITY_RESPONSE.as_bytes()
+        || !stderr_bytes.is_empty()
+    {
+        return Err(format!(
+            "packaged bubblewrap is incompatible with private companion protocol 2: {}",
+            program.display()
+        ));
+    }
+    Ok(())
+}
+
+fn set_nonblocking(fd: std::os::fd::RawFd) -> Result<(), String> {
+    // SAFETY: `fd` is an open pipe owned by this process.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags == -1 {
+        return Err(format!(
+            "failed to inspect packaged bubblewrap compatibility pipe: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    // SAFETY: `fd` remains open and `flags | O_NONBLOCK` is a valid file status value.
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1 {
+        return Err(format!(
+            "failed to configure packaged bubblewrap compatibility pipe: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+
+fn read_bounded(pipe: &mut impl Read, output: &mut Vec<u8>, eof: &mut bool) -> Result<(), String> {
+    if *eof {
+        return Ok(());
+    }
+    let mut buffer = [0_u8; 256];
+    loop {
+        match pipe.read(&mut buffer) {
+            Ok(0) => {
+                *eof = true;
+                return Ok(());
+            }
+            Ok(read) => {
+                output.extend_from_slice(&buffer[..read]);
+                if output.len() > MAX_COMPATIBILITY_OUTPUT_BYTES {
+                    return Ok(());
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => return Ok(()),
+            Err(err) => {
+                return Err(format!(
+                    "failed to read packaged bubblewrap compatibility output: {err}"
+                ));
+            }
+        }
+    }
+}
+
+fn terminate_query(child: &mut Child) {
+    let process_group = -(child.id() as i32);
+    // SAFETY: the compatibility child was placed in a process group whose ID is its PID.
+    unsafe {
+        libc::kill(process_group, libc::SIGKILL);
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn find_for_install_context(context: &InstallContext) -> Option<AbsolutePathBuf> {

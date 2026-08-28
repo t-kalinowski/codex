@@ -1,13 +1,42 @@
+load("@crates//:defs.bzl", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_library")
 load("//:defs.bzl", "codex_rust_crate")
+
+SEATBELT_DATA = [
+    "src/restricted_read_only_platform_defaults.sbpl",
+    "src/seatbelt_base_policy.sbpl",
+    "src/seatbelt_network_policy.sbpl",
+    "src/seatbelt_preferences_policy.sbpl",
+]
 
 codex_rust_crate(
     name = "sandboxing",
-    compile_data = [
-        "src/restricted_read_only_platform_defaults.sbpl",
-        "src/seatbelt_base_policy.sbpl",
-        "src/seatbelt_network_policy.sbpl",
-        "src/seatbelt_preferences_policy.sbpl",
-    ],
+    compile_data = SEATBELT_DATA,
     crate_name = "codex_sandboxing",
     test_tags = ["no-sandbox"],
+)
+
+# The private runner disables the Windows telemetry feature without changing
+# the canonical Codex build edge above.
+rust_library(
+    name = "sandboxing-no-windows-telemetry",
+    srcs = glob(["src/**/*.rs"]),
+    compile_data = SEATBELT_DATA,
+    crate_name = "codex_sandboxing",
+    edition = "2024",
+    visibility = [
+        "//codex-rs/linux-sandbox:__pkg__",
+        "//codex-rs/mcp-console-sandbox:__pkg__",
+    ],
+    deps = all_crate_deps(cargo_only = True) + [
+        "//codex-rs/network-proxy",
+        "//codex-rs/protocol",
+        "//codex-rs/utils/absolute-path",
+        "//codex-rs/utils/path-uri",
+        "//codex-rs/utils/pty",
+        "//codex-rs/windows-sandbox-rs:windows-sandbox-rs-no-telemetry",
+    ] + select({
+        "@platforms//os:windows": ["//codex-rs/utils/home-dir"],
+        "//conditions:default": [],
+    }),
 )
