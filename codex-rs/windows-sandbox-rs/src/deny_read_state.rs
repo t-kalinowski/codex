@@ -1,4 +1,4 @@
-use crate::acl::revoke_ace;
+use crate::acl::revoke_ace_checked;
 use crate::deny_read_acl::apply_deny_read_acls;
 use crate::deny_read_acl::lexical_path_key;
 use crate::setup::sandbox_dir;
@@ -50,8 +50,9 @@ pub unsafe fn sync_persistent_deny_read_acls(
         .collect::<HashSet<_>>();
 
     for path in previous_paths {
-        if !desired_keys.contains(&lexical_path_key(&path)) {
-            revoke_ace(&path, psid);
+        if !desired_keys.contains(&lexical_path_key(&path)) && path.exists() {
+            unsafe { revoke_ace_checked(&path, psid) }
+                .with_context(|| format!("revoke stale deny-read ACE from {}", path.display()))?;
         }
     }
 
