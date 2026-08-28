@@ -9,6 +9,10 @@ name = "codex_sandboxing"
 path = "src/lib.rs"
 doctest = false
 
+[features]
+default = ["windows-sandbox-telemetry"]
+windows-sandbox-telemetry = ["codex-windows-sandbox/telemetry"]
+
 [lints]
 workspace = true
 
@@ -19,7 +23,7 @@ codex-protocol = { workspace = true }
 codex-utils-absolute-path = { workspace = true }
 codex-utils-path-uri = { workspace = true }
 codex-utils-pty = { workspace = true }
-codex-windows-sandbox = { workspace = true }
+codex-windows-sandbox = { path = "../windows-sandbox-rs", default-features = false }
 dunce = { workspace = true }
 libc = { workspace = true }
 serde_json = { workspace = true }
