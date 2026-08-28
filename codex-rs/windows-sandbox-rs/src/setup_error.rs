@@ -68,6 +68,8 @@ pub enum SetupErrorCode {
     HelperFirewallRuleVerifyFailed,
     /// Helper failed to spawn the read-ACL helper process.
     HelperReadAclHelperSpawnFailed,
+    /// Helper failed to apply required read ACLs before target launch.
+    HelperReadAclApplyFailed,
     /// Helper failed to lock down sandbox directories via ACLs.
     HelperSandboxLockFailed,
     /// Helper failed for an unmapped or unexpected reason.
@@ -105,6 +107,7 @@ impl SetupErrorCode {
             }
             Self::HelperFirewallRuleVerifyFailed => "helper_firewall_rule_verify_failed",
             Self::HelperReadAclHelperSpawnFailed => "helper_read_acl_helper_spawn_failed",
+            Self::HelperReadAclApplyFailed => "helper_read_acl_apply_failed",
             Self::HelperSandboxLockFailed => "helper_sandbox_lock_failed",
             Self::HelperUnknownError => "helper_unknown_error",
         }

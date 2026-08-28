@@ -46,6 +46,12 @@ const GENERIC_ALL: u32 = 0x1000_0000;
 const WIN_WORLD_SID: i32 = 1;
 const SE_GROUP_LOGON_ID: u32 = 0xC0000000;
 
+#[derive(Clone, Copy)]
+enum BaseIdentityRestrictions {
+    Include,
+    Exclude,
+}
+
 #[repr(C)]
 struct TokenDefaultDaclInfo {
     default_dacl: *mut ACL,
@@ -432,6 +438,30 @@ pub unsafe fn create_readonly_token_with_caps_and_user_from(
     )
 }
 
+/// Creates the standalone runner's target token from exactly the active
+/// filesystem capability SIDs and any additional non-filesystem identity SIDs.
+///
+/// Unlike the existing Codex constructors, this does not add the token user,
+/// logon SID, or Everyone SID to `SidsToRestrict`. Those broad identities would
+/// allow a target to use host object ACLs that are unrelated to the normalized
+/// filesystem policy.
+///
+/// # Safety
+/// Caller must close the returned token handle; `base_token` must be a valid
+/// primary token and every SID pointer must remain valid for this call.
+pub unsafe fn create_standalone_token_with_caps_from(
+    base_token: HANDLE,
+    psid_capabilities: &[*mut c_void],
+    additional_restricting_sids: &[*mut c_void],
+) -> Result<HANDLE> {
+    create_token_with_caps_from_mode(
+        base_token,
+        psid_capabilities,
+        additional_restricting_sids,
+        BaseIdentityRestrictions::Exclude,
+    )
+}
+
 unsafe fn create_token_with_caps_user_and_additional_restrictions_from(
     base_token: HANDLE,
     psid_capabilities: &[*mut c_void],
@@ -442,13 +472,32 @@ unsafe fn create_token_with_caps_user_and_additional_restrictions_from(
     let mut extra_restricting_sids = Vec::with_capacity(additional_restricting_sids.len() + 1);
     extra_restricting_sids.push(psid_user);
     extra_restricting_sids.extend_from_slice(additional_restricting_sids);
-    create_token_with_caps_from(base_token, psid_capabilities, &extra_restricting_sids)
+    create_token_with_caps_from_mode(
+        base_token,
+        psid_capabilities,
+        &extra_restricting_sids,
+        BaseIdentityRestrictions::Include,
+    )
 }
 
 unsafe fn create_token_with_caps_from(
     base_token: HANDLE,
     psid_capabilities: &[*mut c_void],
     extra_restricting_sids: &[*mut c_void],
+) -> Result<HANDLE> {
+    create_token_with_caps_from_mode(
+        base_token,
+        psid_capabilities,
+        extra_restricting_sids,
+        BaseIdentityRestrictions::Include,
+    )
+}
+
+unsafe fn create_token_with_caps_from_mode(
+    base_token: HANDLE,
+    psid_capabilities: &[*mut c_void],
+    extra_restricting_sids: &[*mut c_void],
+    base_identity_restrictions: BaseIdentityRestrictions,
 ) -> Result<HANDLE> {
     if psid_capabilities.is_empty() {
         return Err(anyhow!("no capability SIDs provided"));
@@ -458,9 +507,18 @@ unsafe fn create_token_with_caps_from(
     let mut everyone = world_sid()?;
     let psid_everyone = everyone.as_mut_ptr() as *mut c_void;
 
-    // Exact order: Capabilities..., ExtraRestricting..., Logon, Everyone
+    let base_identity_count = match base_identity_restrictions {
+        BaseIdentityRestrictions::Include => 2,
+        BaseIdentityRestrictions::Exclude => 0,
+    };
+    // Existing Codex callers retain their exact order: Capabilities...,
+    // ExtraRestricting..., Logon, Everyone. The standalone runner stops after
+    // ExtraRestricting so broad base identities cannot widen host authority.
     let mut entries: Vec<SID_AND_ATTRIBUTES> =
-        vec![std::mem::zeroed(); psid_capabilities.len() + extra_restricting_sids.len() + 2];
+        vec![
+            std::mem::zeroed();
+            psid_capabilities.len() + extra_restricting_sids.len() + base_identity_count
+        ];
     for (i, psid) in psid_capabilities.iter().enumerate() {
         entries[i].Sid = *psid;
         entries[i].Attributes = 0;
@@ -470,11 +528,16 @@ unsafe fn create_token_with_caps_from(
         entries[extras_idx + i].Sid = *psid;
         entries[extras_idx + i].Attributes = 0;
     }
-    let logon_idx = extras_idx + extra_restricting_sids.len();
-    entries[logon_idx].Sid = psid_logon;
-    entries[logon_idx].Attributes = 0;
-    entries[logon_idx + 1].Sid = psid_everyone;
-    entries[logon_idx + 1].Attributes = 0;
+    if matches!(
+        base_identity_restrictions,
+        BaseIdentityRestrictions::Include
+    ) {
+        let logon_idx = extras_idx + extra_restricting_sids.len();
+        entries[logon_idx].Sid = psid_logon;
+        entries[logon_idx].Attributes = 0;
+        entries[logon_idx + 1].Sid = psid_everyone;
+        entries[logon_idx + 1].Attributes = 0;
+    }
 
     let mut new_token: HANDLE = 0;
     let flags = DISABLE_MAX_PRIVILEGE | LUA_TOKEN | WRITE_RESTRICTED;
