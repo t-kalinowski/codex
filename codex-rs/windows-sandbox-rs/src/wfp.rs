@@ -1,17 +1,22 @@
 mod filter_specs;
 
+use crate::WindowsSandboxPolicyNamespace;
 use crate::to_wide;
+use crate::winutil::resolve_sid;
 use anyhow::Result;
 use std::ffi::OsStr;
+use std::ffi::c_void;
+use std::mem::size_of;
 use std::mem::zeroed;
 use std::ptr::null;
 use std::ptr::null_mut;
+use std::slice;
+use windows_sys::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER;
 use windows_sys::Win32::Foundation::FWP_E_ALREADY_EXISTS;
 use windows_sys::Win32::Foundation::FWP_E_FILTER_NOT_FOUND;
 use windows_sys::Win32::Foundation::FWP_E_NOT_FOUND;
+use windows_sys::Win32::Foundation::GetLastError;
 use windows_sys::Win32::Foundation::HANDLE;
-use windows_sys::Win32::Foundation::HLOCAL;
-use windows_sys::Win32::Foundation::LocalFree;
 use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_ACTION_BLOCK;
 use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_ACTRL_MATCH_FILTER;
 use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::FWP_BYTE_BLOB;
@@ -42,17 +47,29 @@ use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::FwpmEngineC
 use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::FwpmEngineOpen0;
 use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::FwpmFilterAdd0;
 use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::FwpmFilterDeleteByKey0;
+use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::FwpmFilterGetByKey0;
+use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::FwpmFreeMemory0;
 use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::FwpmProviderAdd0;
+use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::FwpmProviderGetByKey0;
 use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::FwpmSubLayerAdd0;
+use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::FwpmSubLayerGetByKey0;
 use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::FwpmTransactionAbort0;
 use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::FwpmTransactionBegin0;
 use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::FwpmTransactionCommit0;
-use windows_sys::Win32::Security::Authorization::BuildExplicitAccessWithNameW;
-use windows_sys::Win32::Security::Authorization::BuildSecurityDescriptorW;
-use windows_sys::Win32::Security::Authorization::EXPLICIT_ACCESS_W;
-use windows_sys::Win32::Security::Authorization::GRANT_ACCESS;
-use windows_sys::Win32::Security::PSECURITY_DESCRIPTOR;
+use windows_sys::Win32::Security::ACCESS_ALLOWED_ACE;
+use windows_sys::Win32::Security::ACL;
+use windows_sys::Win32::Security::ACL_REVISION;
+use windows_sys::Win32::Security::AddAccessAllowedAce;
+use windows_sys::Win32::Security::GetLengthSid;
+use windows_sys::Win32::Security::InitializeAcl;
+use windows_sys::Win32::Security::InitializeSecurityDescriptor;
+use windows_sys::Win32::Security::IsValidSecurityDescriptor;
+use windows_sys::Win32::Security::IsValidSid;
+use windows_sys::Win32::Security::MakeSelfRelativeSD;
+use windows_sys::Win32::Security::SECURITY_DESCRIPTOR;
+use windows_sys::Win32::Security::SetSecurityDescriptorDacl;
 use windows_sys::Win32::System::Rpc::RPC_C_AUTHN_DEFAULT;
+use windows_sys::Win32::System::SystemServices::SECURITY_DESCRIPTOR_REVISION;
 use windows_sys::Win32::System::Threading::INFINITE;
 use windows_sys::core::GUID;
 
@@ -65,6 +82,7 @@ const PROVIDER_NAME: &str = "Codex Windows Sandbox WFP";
 const PROVIDER_DESCRIPTION: &str = "Persistent WFP provider for Codex Windows sandbox filters";
 const SUBLAYER_NAME: &str = "Codex Windows Sandbox WFP";
 const SUBLAYER_DESCRIPTION: &str = "Persistent WFP sublayer for Codex Windows sandbox filters";
+const SUBLAYER_WEIGHT_HINT: u16 = 0x8000;
 
 // WFP identifies persistent providers, sublayers, and filters by stable GUIDs.
 // These values are Codex-owned identities; do not regenerate them unless we
@@ -77,6 +95,15 @@ const SUBLAYER_KEY: GUID = GUID::from_u128(0xe65054fd_4d32_4c7c_95ef_621f0cf6431
 /// This is intended to run from the already-elevated setup helper. Callers
 /// should treat any returned error as non-fatal to the rest of setup.
 pub fn install_wfp_filters_for_account(account: &str) -> Result<usize> {
+    install_wfp_filters_for_account_in_namespace(account, WindowsSandboxPolicyNamespace::Codex)
+}
+
+/// Installs the persistent WFP filters for one closed Windows sandbox policy namespace.
+#[doc(hidden)]
+pub fn install_wfp_filters_for_account_in_namespace(
+    account: &str,
+    namespace: WindowsSandboxPolicyNamespace,
+) -> Result<usize> {
     let engine = Engine::open()?;
     let mut transaction = engine.begin_transaction()?;
     ensure_provider(engine.handle)?;
@@ -85,13 +112,264 @@ pub fn install_wfp_filters_for_account(account: &str) -> Result<usize> {
     let user_condition = UserMatchCondition::for_account(account)?;
     let mut installed_filter_count = 0;
     for spec in FILTER_SPECS {
-        delete_filter_if_present(engine.handle, &spec.key)?;
-        add_filter(engine.handle, spec, &user_condition)?;
+        delete_filter_if_present(engine.handle, &spec.key(namespace))?;
+        add_filter(engine.handle, spec, namespace, &user_condition)?;
         installed_filter_count += 1;
     }
 
     transaction.commit()?;
     Ok(installed_filter_count)
+}
+
+/// Verifies every authority-bearing field of the persistent WFP filters for
+/// one closed Windows sandbox policy namespace.
+#[doc(hidden)]
+pub fn verify_wfp_filters_for_account_in_namespace(
+    account: &str,
+    namespace: WindowsSandboxPolicyNamespace,
+) -> Result<()> {
+    let engine = Engine::open()?;
+    verify_provider(engine.handle)?;
+    verify_sublayer(engine.handle)?;
+    let user_condition = UserMatchCondition::for_account(account)?;
+    for spec in FILTER_SPECS {
+        verify_filter(engine.handle, spec, namespace, &user_condition)?;
+    }
+    Ok(())
+}
+
+struct RetrievedFilter(*mut FWPM_FILTER0);
+
+impl RetrievedFilter {
+    fn get(engine: HANDLE, key: &GUID) -> Result<Self> {
+        let mut filter = null_mut();
+        let result = unsafe { FwpmFilterGetByKey0(engine, key, &mut filter) };
+        ensure_success(result, "FwpmFilterGetByKey0")?;
+        if filter.is_null() {
+            anyhow::bail!("FwpmFilterGetByKey0 returned a null filter");
+        }
+        Ok(Self(filter))
+    }
+
+    fn as_ref(&self) -> &FWPM_FILTER0 {
+        unsafe { &*self.0 }
+    }
+}
+
+impl Drop for RetrievedFilter {
+    fn drop(&mut self) {
+        let mut filter = self.0.cast::<c_void>();
+        unsafe { FwpmFreeMemory0(&mut filter) };
+    }
+}
+
+struct RetrievedProvider(*mut FWPM_PROVIDER0);
+
+impl RetrievedProvider {
+    fn get(engine: HANDLE) -> Result<Self> {
+        let mut provider = null_mut();
+        let result = unsafe { FwpmProviderGetByKey0(engine, &PROVIDER_KEY, &mut provider) };
+        ensure_success(result, "FwpmProviderGetByKey0")?;
+        if provider.is_null() {
+            anyhow::bail!("FwpmProviderGetByKey0 returned a null provider");
+        }
+        Ok(Self(provider))
+    }
+
+    fn as_ref(&self) -> &FWPM_PROVIDER0 {
+        unsafe { &*self.0 }
+    }
+}
+
+impl Drop for RetrievedProvider {
+    fn drop(&mut self) {
+        let mut provider = self.0.cast::<c_void>();
+        unsafe { FwpmFreeMemory0(&mut provider) };
+    }
+}
+
+struct RetrievedSublayer(*mut FWPM_SUBLAYER0);
+
+impl RetrievedSublayer {
+    fn get(engine: HANDLE) -> Result<Self> {
+        let mut sublayer = null_mut();
+        let result = unsafe { FwpmSubLayerGetByKey0(engine, &SUBLAYER_KEY, &mut sublayer) };
+        ensure_success(result, "FwpmSubLayerGetByKey0")?;
+        if sublayer.is_null() {
+            anyhow::bail!("FwpmSubLayerGetByKey0 returned a null sublayer");
+        }
+        Ok(Self(sublayer))
+    }
+
+    fn as_ref(&self) -> &FWPM_SUBLAYER0 {
+        unsafe { &*self.0 }
+    }
+}
+
+impl Drop for RetrievedSublayer {
+    fn drop(&mut self) {
+        let mut sublayer = self.0.cast::<c_void>();
+        unsafe { FwpmFreeMemory0(&mut sublayer) };
+    }
+}
+
+fn verify_provider(engine: HANDLE) -> Result<()> {
+    let retrieved = RetrievedProvider::get(engine)
+        .map_err(|error| anyhow::anyhow!("WFP provider is unavailable: {error}"))?;
+    let provider = retrieved.as_ref();
+    if !guid_eq(&provider.providerKey, &PROVIDER_KEY) {
+        anyhow::bail!("WFP provider has an incompatible key");
+    }
+    if provider.flags != FWPM_PROVIDER_FLAG_PERSISTENT {
+        anyhow::bail!(
+            "WFP provider has incompatible flags 0x{:08X}; expected persistent-only flags 0x{:08X}",
+            provider.flags,
+            FWPM_PROVIDER_FLAG_PERSISTENT
+        );
+    }
+    if provider.providerData.size != 0 {
+        anyhow::bail!("WFP provider has incompatible provider data");
+    }
+    if !provider.serviceName.is_null() {
+        anyhow::bail!("WFP provider is unexpectedly associated with a Windows service");
+    }
+    Ok(())
+}
+
+fn verify_sublayer(engine: HANDLE) -> Result<()> {
+    let retrieved = RetrievedSublayer::get(engine)
+        .map_err(|error| anyhow::anyhow!("WFP sublayer is unavailable: {error}"))?;
+    let sublayer = retrieved.as_ref();
+    if !guid_eq(&sublayer.subLayerKey, &SUBLAYER_KEY) {
+        anyhow::bail!("WFP sublayer has an incompatible key");
+    }
+    if sublayer.flags != FWPM_SUBLAYER_FLAG_PERSISTENT {
+        anyhow::bail!(
+            "WFP sublayer has incompatible flags 0x{:08X}; expected persistent-only flags 0x{:08X}",
+            sublayer.flags,
+            FWPM_SUBLAYER_FLAG_PERSISTENT
+        );
+    }
+    if sublayer.providerKey.is_null() || !unsafe { guid_eq(&*sublayer.providerKey, &PROVIDER_KEY) }
+    {
+        anyhow::bail!("WFP sublayer is associated with an incompatible provider");
+    }
+    if sublayer.providerData.size != 0 {
+        anyhow::bail!("WFP sublayer has incompatible provider data");
+    }
+    Ok(())
+}
+
+fn verify_filter(
+    engine: HANDLE,
+    spec: &FilterSpec,
+    namespace: WindowsSandboxPolicyNamespace,
+    user_condition: &UserMatchCondition,
+) -> Result<()> {
+    let expected_key = spec.key(namespace);
+    let retrieved = RetrievedFilter::get(engine, &expected_key).map_err(|error| {
+        anyhow::anyhow!(
+            "WFP filter {} is unavailable: {error}",
+            spec.name(namespace)
+        )
+    })?;
+    let filter = retrieved.as_ref();
+    let provider_matches =
+        !filter.providerKey.is_null() && unsafe { guid_eq(&*filter.providerKey, &PROVIDER_KEY) };
+    if !guid_eq(&filter.filterKey, &expected_key)
+        || !provider_matches
+        || !guid_eq(&filter.layerKey, &spec.layer_key)
+        || !guid_eq(&filter.subLayerKey, &SUBLAYER_KEY)
+        || filter.flags != FWPM_FILTER_FLAG_PERSISTENT
+        || filter.action.r#type != FWP_ACTION_BLOCK
+        || filter.weight.r#type != FWP_EMPTY
+    {
+        anyhow::bail!(
+            "WFP filter {} has incompatible authority fields",
+            spec.name(namespace)
+        );
+    }
+    verify_filter_conditions(filter, spec, user_condition).map_err(|error| {
+        anyhow::anyhow!(
+            "WFP filter {} is incompatible: {error}",
+            spec.name(namespace)
+        )
+    })
+}
+
+fn verify_filter_conditions(
+    filter: &FWPM_FILTER0,
+    spec: &FilterSpec,
+    user_condition: &UserMatchCondition,
+) -> Result<()> {
+    let actual_count = usize::try_from(filter.numFilterConditions)?;
+    if actual_count != spec.conditions.len() {
+        anyhow::bail!(
+            "expected {} conditions, found {actual_count}",
+            spec.conditions.len()
+        );
+    }
+    if actual_count != 0 && filter.filterCondition.is_null() {
+        anyhow::bail!("filter condition array is null");
+    }
+    let actual_conditions = unsafe { slice::from_raw_parts(filter.filterCondition, actual_count) };
+    for (actual, expected) in actual_conditions.iter().zip(spec.conditions) {
+        if actual.matchType != FWP_MATCH_EQUAL {
+            anyhow::bail!("filter condition does not use exact matching");
+        }
+        match expected {
+            ConditionSpec::User => {
+                if !guid_eq(&actual.fieldKey, &FWPM_CONDITION_ALE_USER_ID)
+                    || actual.conditionValue.r#type != FWP_SECURITY_DESCRIPTOR_TYPE
+                {
+                    anyhow::bail!("filter user condition has an incompatible shape");
+                }
+                let actual_blob = unsafe { actual.conditionValue.Anonymous.sd };
+                if !unsafe { security_descriptor_matches(actual_blob, user_condition.bytes())? } {
+                    anyhow::bail!("filter user condition targets a different identity");
+                }
+            }
+            ConditionSpec::Protocol(protocol) => {
+                if !guid_eq(&actual.fieldKey, &FWPM_CONDITION_IP_PROTOCOL)
+                    || actual.conditionValue.r#type != FWP_UINT8
+                    || unsafe { actual.conditionValue.Anonymous.uint8 } != *protocol
+                {
+                    anyhow::bail!("filter protocol condition differs from the requested policy");
+                }
+            }
+            ConditionSpec::RemotePort(port) => {
+                if !guid_eq(&actual.fieldKey, &FWPM_CONDITION_IP_REMOTE_PORT)
+                    || actual.conditionValue.r#type != FWP_UINT16
+                    || unsafe { actual.conditionValue.Anonymous.uint16 } != *port
+                {
+                    anyhow::bail!("filter port condition differs from the requested policy");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn guid_eq(left: &GUID, right: &GUID) -> bool {
+    left.data1 == right.data1
+        && left.data2 == right.data2
+        && left.data3 == right.data3
+        && left.data4 == right.data4
+}
+
+unsafe fn security_descriptor_matches(blob: *const FWP_BYTE_BLOB, expected: &[u8]) -> Result<bool> {
+    if blob.is_null() {
+        anyhow::bail!("filter security descriptor is null");
+    }
+    let blob = unsafe { &*blob };
+    if blob.size == 0 {
+        return Ok(expected.is_empty());
+    }
+    if blob.data.is_null() {
+        anyhow::bail!("filter security descriptor data is null");
+    }
+    let actual = unsafe { slice::from_raw_parts(blob.data, blob.size as usize) };
+    Ok(actual == expected)
 }
 
 /// Owns an open WFP engine handle and closes it on drop.
@@ -168,59 +446,115 @@ impl Drop for Transaction<'_> {
 
 /// Builds the ALE_USER_ID condition blob that scopes filters to one account.
 struct UserMatchCondition {
-    security_descriptor: PSECURITY_DESCRIPTOR,
+    security_descriptor: Vec<u32>,
+    security_descriptor_len: usize,
     blob: FWP_BYTE_BLOB,
 }
 
 impl UserMatchCondition {
     fn for_account(account: &str) -> Result<Self> {
-        let account_w = to_wide(OsStr::new(account));
-        let mut access: EXPLICIT_ACCESS_W = unsafe { zeroed() };
-        unsafe {
-            BuildExplicitAccessWithNameW(
-                &mut access,
-                account_w.as_ptr(),
-                FWP_ACTRL_MATCH_FILTER,
-                GRANT_ACCESS,
-                0,
-            );
-        }
+        let sid = resolve_sid(account)?;
+        let (mut security_descriptor, security_descriptor_len) = security_descriptor_for_sid(&sid)?;
 
-        let mut security_descriptor: PSECURITY_DESCRIPTOR = null_mut();
-        let mut security_descriptor_len = 0;
-        let result = unsafe {
-            BuildSecurityDescriptorW(
-                null(),
-                null(),
-                1,
-                &access,
-                0,
-                null(),
-                null_mut(),
-                &mut security_descriptor_len,
-                &mut security_descriptor,
-            )
+        let blob = FWP_BYTE_BLOB {
+            size: u32::try_from(security_descriptor_len)?,
+            data: security_descriptor.as_mut_ptr().cast::<u8>(),
         };
-        ensure_success(result, "BuildSecurityDescriptorW")?;
-
         Ok(Self {
             security_descriptor,
-            blob: FWP_BYTE_BLOB {
-                size: security_descriptor_len,
-                data: security_descriptor as *mut u8,
-            },
+            security_descriptor_len,
+            blob,
         })
+    }
+
+    fn bytes(&self) -> &[u8] {
+        unsafe {
+            slice::from_raw_parts(
+                self.security_descriptor.as_ptr().cast::<u8>(),
+                self.security_descriptor_len,
+            )
+        }
     }
 }
 
-impl Drop for UserMatchCondition {
-    fn drop(&mut self) {
-        if !self.security_descriptor.is_null() {
-            unsafe {
-                LocalFree(self.security_descriptor as HLOCAL);
-            }
-        }
+fn security_descriptor_for_sid(sid: &[u8]) -> Result<(Vec<u32>, usize)> {
+    // Build the one-ACE descriptor directly from the resolved SID. This avoids
+    // account-provider resolution while preserving WFP's exact
+    // FWP_ACTRL_MATCH_FILTER access check.
+    let sid_ptr = sid.as_ptr().cast::<c_void>().cast_mut();
+    if unsafe { IsValidSid(sid_ptr) } == 0 {
+        anyhow::bail!("resolved WFP account SID is invalid");
     }
+    let sid_len = usize::try_from(unsafe { GetLengthSid(sid_ptr) })?;
+    if sid_len != sid.len() {
+        anyhow::bail!("resolved WFP account SID has trailing data");
+    }
+
+    let acl_len = size_of::<ACL>()
+        .checked_add(size_of::<ACCESS_ALLOWED_ACE>())
+        .and_then(|len| len.checked_sub(size_of::<u32>()))
+        .and_then(|len| len.checked_add(sid_len))
+        .ok_or_else(|| anyhow::anyhow!("WFP account ACL size overflow"))?;
+    let mut acl_storage = vec![0_u32; acl_len.div_ceil(size_of::<u32>())];
+    let acl = acl_storage.as_mut_ptr().cast::<ACL>();
+    ensure_bool_success(
+        unsafe { InitializeAcl(acl, u32::try_from(acl_len)?, ACL_REVISION) },
+        "InitializeAcl",
+    )?;
+    ensure_bool_success(
+        unsafe { AddAccessAllowedAce(acl, ACL_REVISION, FWP_ACTRL_MATCH_FILTER, sid_ptr) },
+        "AddAccessAllowedAce",
+    )?;
+
+    let mut absolute: SECURITY_DESCRIPTOR = unsafe { zeroed() };
+    let absolute_ptr = (&mut absolute as *mut SECURITY_DESCRIPTOR).cast::<c_void>();
+    ensure_bool_success(
+        unsafe { InitializeSecurityDescriptor(absolute_ptr, SECURITY_DESCRIPTOR_REVISION) },
+        "InitializeSecurityDescriptor",
+    )?;
+    ensure_bool_success(
+        unsafe { SetSecurityDescriptorDacl(absolute_ptr, 1, acl, 0) },
+        "SetSecurityDescriptorDacl",
+    )?;
+
+    let mut self_relative_len = 0;
+    let sizing_result =
+        unsafe { MakeSelfRelativeSD(absolute_ptr, null_mut(), &mut self_relative_len) };
+    if sizing_result != 0 {
+        anyhow::bail!("MakeSelfRelativeSD unexpectedly accepted a null output buffer");
+    }
+    let sizing_error = unsafe { GetLastError() };
+    if sizing_error != ERROR_INSUFFICIENT_BUFFER {
+        anyhow::bail!(
+            "MakeSelfRelativeSD size query failed: {}",
+            format_error_code(sizing_error)
+        );
+    }
+    if self_relative_len == 0 {
+        anyhow::bail!("MakeSelfRelativeSD reported an empty security descriptor");
+    }
+
+    let required_len = usize::try_from(self_relative_len)?;
+    let mut self_relative = vec![0_u32; required_len.div_ceil(size_of::<u32>())];
+    let mut output_len = self_relative_len;
+    ensure_bool_success(
+        unsafe {
+            MakeSelfRelativeSD(
+                absolute_ptr,
+                self_relative.as_mut_ptr().cast::<c_void>(),
+                &mut output_len,
+            )
+        },
+        "MakeSelfRelativeSD",
+    )?;
+    let output_len = usize::try_from(output_len)?;
+    if output_len != required_len {
+        anyhow::bail!("MakeSelfRelativeSD returned an unexpected security descriptor size");
+    }
+    if unsafe { IsValidSecurityDescriptor(self_relative.as_mut_ptr().cast::<c_void>()) } == 0 {
+        anyhow::bail!("MakeSelfRelativeSD returned an invalid security descriptor");
+    }
+    Ok((self_relative, output_len))
 }
 
 /// Ensures the persistent Codex WFP provider exists.
@@ -239,7 +573,8 @@ fn ensure_provider(engine: HANDLE) -> Result<()> {
     };
 
     let result = unsafe { FwpmProviderAdd0(engine, &provider, null_mut()) };
-    ensure_success_or(result, "FwpmProviderAdd0", &[FWP_E_ALREADY_EXISTS as u32])
+    ensure_success_or(result, "FwpmProviderAdd0", &[FWP_E_ALREADY_EXISTS as u32])?;
+    verify_provider(engine)
 }
 
 /// Ensures the persistent Codex sublayer exists under the Codex provider.
@@ -256,25 +591,29 @@ fn ensure_sublayer(engine: HANDLE) -> Result<()> {
         flags: FWPM_SUBLAYER_FLAG_PERSISTENT,
         providerKey: &provider_key as *const _ as *mut _,
         providerData: empty_blob(),
-        weight: 0x8000,
+        // BFE may assign the closest available weight instead of preserving
+        // this requested value exactly.
+        weight: SUBLAYER_WEIGHT_HINT,
     };
 
     let result = unsafe { FwpmSubLayerAdd0(engine, &sublayer, null_mut()) };
-    ensure_success_or(result, "FwpmSubLayerAdd0", &[FWP_E_ALREADY_EXISTS as u32])
+    ensure_success_or(result, "FwpmSubLayerAdd0", &[FWP_E_ALREADY_EXISTS as u32])?;
+    verify_sublayer(engine)
 }
 
 /// Adds one blocking WFP filter from the static filter spec list.
 fn add_filter(
     engine: HANDLE,
     spec: &FilterSpec,
+    namespace: WindowsSandboxPolicyNamespace,
     user_condition: &UserMatchCondition,
 ) -> Result<()> {
-    let filter_name = to_wide(OsStr::new(spec.name));
+    let filter_name = to_wide(OsStr::new(spec.name(namespace)));
     let filter_description = to_wide(OsStr::new(spec.description));
     let mut filter_conditions = build_conditions(spec.conditions, user_condition);
     let provider_key = PROVIDER_KEY;
     let filter = FWPM_FILTER0 {
-        filterKey: spec.key,
+        filterKey: spec.key(namespace),
         displayData: FWPM_DISPLAY_DATA0 {
             name: filter_name.as_ptr() as *mut _,
             description: filter_description.as_ptr() as *mut _,
@@ -301,7 +640,7 @@ fn add_filter(
 
     let mut filter_id = 0_u64;
     let result = unsafe { FwpmFilterAdd0(engine, &filter, null_mut(), &mut filter_id) };
-    ensure_success(result, &format!("FwpmFilterAdd0({})", spec.name))
+    ensure_success(result, &format!("FwpmFilterAdd0({})", spec.name(namespace)))
 }
 
 /// Converts our compact condition specs into WFP filter conditions.
@@ -356,6 +695,14 @@ fn ensure_success(result: u32, operation: &str) -> Result<()> {
     ensure_success_or(result, operation, &[])
 }
 
+fn ensure_bool_success(result: i32, operation: &str) -> Result<()> {
+    if result == 0 {
+        let error = unsafe { GetLastError() };
+        anyhow::bail!("{operation} failed: {}", format_error_code(error));
+    }
+    Ok(())
+}
+
 fn ensure_success_or(result: u32, operation: &str, allowed: &[u32]) -> Result<()> {
     if result == 0 || allowed.contains(&result) {
         Ok(())
@@ -391,32 +738,71 @@ fn zero_guid() -> GUID {
 
 #[cfg(test)]
 mod tests {
+    use super::Engine;
     use super::FILTER_SPECS;
+    use super::delete_filter_if_present;
+    use super::install_wfp_filters_for_account_in_namespace;
+    use super::verify_wfp_filters_for_account_in_namespace;
+    use crate::policy_namespace::WindowsSandboxPolicyNamespace;
     use pretty_assertions::assert_eq;
     use std::collections::BTreeSet;
 
     #[test]
-    fn filter_keys_are_unique() {
-        let keys = FILTER_SPECS
-            .iter()
-            .map(|spec| {
-                (
-                    spec.key.data1,
-                    spec.key.data2,
-                    spec.key.data3,
-                    spec.key.data4,
-                )
-            })
-            .collect::<BTreeSet<_>>();
-        assert_eq!(keys.len(), FILTER_SPECS.len());
+    fn policy_namespace_filter_keys_are_disjoint() {
+        let keys = [
+            WindowsSandboxPolicyNamespace::Codex,
+            WindowsSandboxPolicyNamespace::McpConsole,
+        ]
+        .into_iter()
+        .flat_map(|namespace| FILTER_SPECS.iter().map(move |spec| spec.key(namespace)))
+        .map(|key| (key.data1, key.data2, key.data3, key.data4))
+        .collect::<BTreeSet<_>>();
+        assert_eq!(keys.len(), FILTER_SPECS.len() * 2);
     }
 
     #[test]
-    fn filter_names_are_unique() {
-        let names = FILTER_SPECS
-            .iter()
-            .map(|spec| spec.name)
-            .collect::<BTreeSet<_>>();
-        assert_eq!(names.len(), FILTER_SPECS.len());
+    fn policy_namespace_filter_names_are_disjoint() {
+        let names = [
+            WindowsSandboxPolicyNamespace::Codex,
+            WindowsSandboxPolicyNamespace::McpConsole,
+        ]
+        .into_iter()
+        .flat_map(|namespace| FILTER_SPECS.iter().map(move |spec| spec.name(namespace)))
+        .collect::<BTreeSet<_>>();
+        assert_eq!(names.len(), FILTER_SPECS.len() * 2);
+    }
+
+    #[test]
+    fn standalone_filter_verification_rejects_a_missing_filter() {
+        if std::env::var("MCP_CONSOLE_SANDBOX_NATIVE_WINDOWS_TESTS").as_deref() != Ok("1") {
+            return;
+        }
+
+        let _lease = crate::policy_lease::acquire_mcp_console_sandbox_policy_lease()
+            .expect("acquire standalone policy lease");
+        let namespace = WindowsSandboxPolicyNamespace::McpConsole;
+        let account = namespace.offline_username();
+        install_wfp_filters_for_account_in_namespace(account, namespace)
+            .expect("install standalone WFP filters");
+        verify_wfp_filters_for_account_in_namespace(account, namespace)
+            .expect("verify installed standalone WFP filters");
+
+        let engine = Engine::open().expect("open WFP engine");
+        delete_filter_if_present(engine.handle, &FILTER_SPECS[0].key(namespace))
+            .expect("delete one standalone WFP filter");
+        drop(engine);
+        let missing = verify_wfp_filters_for_account_in_namespace(account, namespace)
+            .expect_err("missing standalone WFP filter must fail verification");
+        let restored = install_wfp_filters_for_account_in_namespace(account, namespace);
+        assert!(
+            restored.is_ok(),
+            "restore standalone WFP filters: {restored:?}"
+        );
+        assert!(
+            missing
+                .to_string()
+                .contains(FILTER_SPECS[0].name(namespace)),
+            "{missing:#}"
+        );
     }
 }

@@ -10,6 +10,8 @@ mod bundled_bwrap;
 #[cfg(target_os = "linux")]
 mod bwrap;
 #[cfg(target_os = "linux")]
+mod embedding;
+#[cfg(target_os = "linux")]
 mod exec_util;
 #[cfg(target_os = "linux")]
 mod fd_mount;
@@ -24,6 +26,10 @@ mod proxy_lifecycle;
 #[cfg(target_os = "linux")]
 mod proxy_routing;
 
+#[cfg(all(test, target_os = "linux"))]
+#[path = "embedding_tests.rs"]
+mod embedding_tests;
+
 /// Exit status returned when bundled bubblewrap fails digest verification.
 #[cfg(target_os = "linux")]
 pub const BUNDLED_BWRAP_DIGEST_VERIFICATION_FAILURE_EXIT_CODE: i32 = 8;
@@ -32,6 +38,15 @@ pub const BUNDLED_BWRAP_DIGEST_VERIFICATION_FAILURE_EXIT_CODE: i32 = 8;
 pub fn run_main() -> ! {
     linux_run_main::run_main();
 }
+
+#[cfg(target_os = "linux")]
+pub use embedding::EmbeddingConfig;
+#[cfg(target_os = "linux")]
+pub use embedding::dispatch_packaged_bwrap_runtime_preflight;
+#[cfg(target_os = "linux")]
+pub use embedding::prepare_packaged_bwrap;
+#[cfg(target_os = "linux")]
+pub use embedding::verify_packaged_bwrap_runtime;
 
 #[cfg(not(target_os = "linux"))]
 pub fn run_main() -> ! {

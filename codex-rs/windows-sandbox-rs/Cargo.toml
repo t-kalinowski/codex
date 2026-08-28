@@ -10,6 +10,10 @@ name = "codex_windows_sandbox"
 path = "src/lib.rs"
 doctest = false
 
+[features]
+default = ["telemetry"]
+telemetry = ["dep:codex-otel"]
+
 [[bin]]
 name = "codex-windows-sandbox-setup"
 path = "src/bin/setup_main/main.rs"
@@ -31,7 +35,7 @@ chrono = { version = "0.4.42", default-features = false, features = [
 codex-utils-pty = { workspace = true }
 codex-utils-absolute-path = { workspace = true }
 codex-utils-string = { workspace = true }
-codex-otel = { workspace = true }
+codex-otel = { workspace = true, optional = true }
 dunce = "1.0"
 glob = { workspace = true }
 serde = { version = "1.0", features = ["derive"] }

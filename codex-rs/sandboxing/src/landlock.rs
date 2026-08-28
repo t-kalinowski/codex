@@ -1,4 +1,5 @@
 use codex_protocol::models::PermissionProfile;
+use std::ffi::OsString;
 use std::path::Path;
 
 /// Basename used when the Codex executable self-invokes as the Linux sandbox
@@ -28,6 +29,34 @@ pub fn create_linux_sandbox_command_args_for_permission_profile(
     use_legacy_landlock: bool,
     allow_network_for_proxy: bool,
 ) -> Vec<String> {
+    create_linux_sandbox_command_args_for_permission_profile_native(
+        command.into_iter().map(OsString::from).collect(),
+        command_cwd,
+        permission_profile,
+        sandbox_policy_cwd,
+        use_legacy_landlock,
+        allow_network_for_proxy,
+    )
+    .into_iter()
+    .map(|argument| {
+        argument
+            .into_string()
+            .unwrap_or_else(|_| panic!("string command produced a non-UTF-8 helper argument"))
+    })
+    .collect()
+}
+
+/// Converts the permission profile into a native CLI invocation for
+/// `codex-linux-sandbox` without requiring target arguments to be UTF-8.
+#[allow(clippy::too_many_arguments)]
+pub fn create_linux_sandbox_command_args_for_permission_profile_native(
+    command: Vec<OsString>,
+    command_cwd: &Path,
+    permission_profile: &PermissionProfile,
+    sandbox_policy_cwd: &Path,
+    use_legacy_landlock: bool,
+    allow_network_for_proxy: bool,
+) -> Vec<OsString> {
     let permission_profile_json = serde_json::to_string(permission_profile)
         .unwrap_or_else(|err| panic!("failed to serialize permission profile: {err}"));
     let sandbox_policy_cwd = sandbox_policy_cwd
@@ -39,22 +68,22 @@ pub fn create_linux_sandbox_command_args_for_permission_profile(
         .unwrap_or_else(|| panic!("command cwd must be valid UTF-8"))
         .to_string();
 
-    let mut linux_cmd: Vec<String> = vec![
-        "--sandbox-policy-cwd".to_string(),
-        sandbox_policy_cwd,
-        "--command-cwd".to_string(),
-        command_cwd,
-        "--permission-profile".to_string(),
-        permission_profile_json,
+    let mut linux_cmd = vec![
+        OsString::from("--sandbox-policy-cwd"),
+        OsString::from(sandbox_policy_cwd),
+        OsString::from("--command-cwd"),
+        OsString::from(command_cwd),
+        OsString::from("--permission-profile"),
+        OsString::from(permission_profile_json),
     ];
     // Proxy-only networking requires bubblewrap's isolated network namespace.
     if use_legacy_landlock && !allow_network_for_proxy {
-        linux_cmd.push("--use-legacy-landlock".to_string());
+        linux_cmd.push(OsString::from("--use-legacy-landlock"));
     }
     if allow_network_for_proxy {
-        linux_cmd.push("--allow-network-for-proxy".to_string());
+        linux_cmd.push(OsString::from("--allow-network-for-proxy"));
     }
-    linux_cmd.push("--".to_string());
+    linux_cmd.push(OsString::from("--"));
     linux_cmd.extend(command);
     linux_cmd
 }

@@ -45,13 +45,13 @@ use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NORMAL;
 use codex_windows_sandbox::SETUP_VERSION;
 use codex_windows_sandbox::SetupErrorCode;
 use codex_windows_sandbox::SetupFailure;
+use codex_windows_sandbox::WindowsSandboxPolicyNamespace;
 use codex_windows_sandbox::dpapi_protect;
 use codex_windows_sandbox::sandbox_dir;
 use codex_windows_sandbox::sandbox_secrets_dir;
 use codex_windows_sandbox::string_from_sid_bytes;
 use codex_windows_sandbox::to_wide;
 
-pub const SANDBOX_USERS_GROUP: &str = "CodexSandboxUsers";
 const SANDBOX_USERS_GROUP_COMMENT: &str = "Codex sandbox internal group (managed)";
 const SID_ADMINISTRATORS: &str = "S-1-5-32-544";
 const SID_USERS: &str = "S-1-5-32-545";
@@ -59,29 +59,35 @@ const SID_AUTHENTICATED_USERS: &str = "S-1-5-11";
 const SID_EVERYONE: &str = "S-1-1-0";
 const SID_SYSTEM: &str = "S-1-5-18";
 
-pub fn ensure_sandbox_users_group(log: &mut dyn Write) -> Result<()> {
-    ensure_local_group(SANDBOX_USERS_GROUP, SANDBOX_USERS_GROUP_COMMENT, log)
+pub fn ensure_sandbox_users_group(
+    namespace: WindowsSandboxPolicyNamespace,
+    log: &mut dyn Write,
+) -> Result<()> {
+    ensure_local_group(namespace.users_group(), SANDBOX_USERS_GROUP_COMMENT, log)
 }
 
-pub fn resolve_sandbox_users_group_sid() -> Result<Vec<u8>> {
-    resolve_sid(SANDBOX_USERS_GROUP)
+pub fn resolve_sandbox_users_group_sid(
+    namespace: WindowsSandboxPolicyNamespace,
+) -> Result<Vec<u8>> {
+    resolve_sid(namespace.users_group())
 }
 
 pub fn provision_sandbox_users(
     codex_home: &Path,
+    namespace: WindowsSandboxPolicyNamespace,
     offline_username: &str,
     online_username: &str,
     log: &mut dyn Write,
 ) -> Result<()> {
-    ensure_sandbox_users_group(log)?;
+    ensure_sandbox_users_group(namespace, log)?;
     super::log_line(
         log,
         &format!("ensuring sandbox users offline={offline_username} online={online_username}"),
     )?;
     let offline_password = random_password();
     let online_password = random_password();
-    ensure_sandbox_user(offline_username, &offline_password, log)?;
-    ensure_sandbox_user(online_username, &online_password, log)?;
+    ensure_sandbox_user(namespace, offline_username, &offline_password, log)?;
+    ensure_sandbox_user(namespace, online_username, &online_password, log)?;
     write_secrets(
         codex_home,
         offline_username,
@@ -92,9 +98,14 @@ pub fn provision_sandbox_users(
     Ok(())
 }
 
-pub fn ensure_sandbox_user(username: &str, password: &str, log: &mut dyn Write) -> Result<()> {
+pub fn ensure_sandbox_user(
+    namespace: WindowsSandboxPolicyNamespace,
+    username: &str,
+    password: &str,
+    log: &mut dyn Write,
+) -> Result<()> {
     ensure_local_user(username, password, log)?;
-    ensure_local_group_member(SANDBOX_USERS_GROUP, username)?;
+    ensure_local_group_member(namespace.users_group(), username)?;
     Ok(())
 }
 
@@ -395,11 +406,16 @@ struct SetupMarker {
     version: u32,
     offline_username: String,
     online_username: String,
+    #[serde(skip_serializing_if = "WindowsSandboxPolicyNamespace::is_codex")]
+    policy_namespace: WindowsSandboxPolicyNamespace,
     created_at: String,
     proxy_ports: Vec<u16>,
     allow_local_binding: bool,
+    command_cwd: Option<PathBuf>,
     read_roots: Vec<PathBuf>,
     write_roots: Vec<PathBuf>,
+    deny_read_paths: Vec<PathBuf>,
+    deny_write_paths: Vec<PathBuf>,
 }
 
 fn write_secrets(
@@ -548,24 +564,40 @@ pub(super) fn prepare_setup_marker(codex_home: &Path, real_user: &str) -> Result
     Ok(())
 }
 
-pub(super) fn commit_setup_marker(
-    codex_home: &Path,
-    offline_user: &str,
-    online_user: &str,
-    proxy_ports: &[u16],
-    allow_local_binding: bool,
-) -> Result<()> {
+pub(super) fn commit_setup_marker(payload: &super::Payload) -> Result<()> {
+    let records_filesystem_policy =
+        payload.policy_namespace == WindowsSandboxPolicyNamespace::McpConsole;
     let marker = SetupMarker {
         version: SETUP_VERSION,
-        offline_username: offline_user.to_string(),
-        online_username: online_user.to_string(),
+        offline_username: payload.offline_username.clone(),
+        online_username: payload.online_username.clone(),
+        policy_namespace: payload.policy_namespace,
         created_at: chrono::Utc::now().to_rfc3339(),
-        proxy_ports: proxy_ports.to_vec(),
-        allow_local_binding,
-        read_roots: Vec::new(),
-        write_roots: Vec::new(),
+        proxy_ports: payload.proxy_ports.clone(),
+        allow_local_binding: payload.allow_local_binding,
+        command_cwd: records_filesystem_policy.then(|| payload.command_cwd.clone()),
+        read_roots: if records_filesystem_policy {
+            payload.read_roots.clone()
+        } else {
+            Vec::new()
+        },
+        write_roots: if records_filesystem_policy {
+            payload.write_roots.clone()
+        } else {
+            Vec::new()
+        },
+        deny_read_paths: if records_filesystem_policy {
+            payload.deny_read_paths.clone()
+        } else {
+            Vec::new()
+        },
+        deny_write_paths: if records_filesystem_policy {
+            payload.deny_write_paths.clone()
+        } else {
+            Vec::new()
+        },
     };
-    let marker_path = sandbox_dir(codex_home).join("setup_marker.json");
+    let marker_path = sandbox_dir(&payload.codex_home).join("setup_marker.json");
     let marker_json = serde_json::to_vec_pretty(&marker).map_err(|err| {
         anyhow::Error::new(SetupFailure::new(
             SetupErrorCode::HelperSetupMarkerWriteFailed,
