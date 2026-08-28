@@ -1,9 +1,6 @@
 # MCP Console sandbox protocol version 1
 
-This document defines the private machine interface exposed by
-`mcp-console-sandbox`. The executable protocol, including its native bootstrap
-arguments and companion layout, is the downstream API. Rust types are
-release-local implementation details.
+This document defines the private machine interface exposed by `mcp-console-sandbox`. The executable protocol, including its native bootstrap arguments and companion layout, is the downstream API. Rust types are release-local implementation details.
 
 ## Native bootstrap
 
@@ -414,12 +411,13 @@ fresh `prepare` operation. The supervisor holds the lifetime lease through full
 Job retirement and proxy cleanup and releases it before publishing `final`.
 
 For managed networking, setup starts and retains the Codex proxy so that the
-WFP state and later target launch use the same selected listener ports and
-restricting SID. Repeating the same setup policy reuses that prepared session;
-changing it shuts down the old proxy and prepares a replacement. The policy
-portion of the later `launch` must match the prepared setup request. Launch
-consumes the retained setup and proxy ownership; control close before launch
-shuts them down.
+Windows Firewall rules and later target launch use the same selected listener
+ports and restricting SID. The fixed WFP filters continue to enforce the
+standalone identity boundary. Repeating the same setup policy reuses that
+prepared session; changing it shuts down the old proxy and prepares a
+replacement. The policy portion of the later `launch` must match the prepared
+setup request. Launch consumes the retained setup and proxy ownership; control
+close before launch shuts them down.
 
 A managed Windows embedding should therefore perform policy-specific setup and
 launch in the same runner process. A fresh runner may prepare during launch,

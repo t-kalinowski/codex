@@ -530,9 +530,15 @@ fn verify_block_rule(rules: &INetFwRules, spec: &BlockRuleSpec<'_>) -> Result<()
     let actual_remote_addresses = unsafe { rule.RemoteAddresses() }
         .map_err(|error| rule_read_error(spec, "RemoteAddresses", error))?
         .to_string();
-    let actual_remote_ports = unsafe { rule.RemotePorts() }
-        .map_err(|error| rule_read_error(spec, "RemotePorts", error))?
-        .to_string();
+    let actual_remote_ports = if actual_protocol == NET_FW_IP_PROTOCOL_TCP.0
+        || actual_protocol == NET_FW_IP_PROTOCOL_UDP.0
+    {
+        unsafe { rule.RemotePorts() }
+            .map_err(|error| rule_read_error(spec, "RemotePorts", error))?
+            .to_string()
+    } else {
+        "*".to_string()
+    };
     let actual_user_scope = unsafe { rule.LocalUserAuthorizedList() }
         .map_err(|error| rule_read_error(spec, "LocalUserAuthorizedList", error))?
         .to_string();
@@ -676,6 +682,9 @@ fn blocked_loopback_tcp_remote_ports(proxy_ports: &[u16]) -> Option<String> {
         .collect::<Vec<_>>();
     allowed_ports.sort_unstable();
     allowed_ports.dedup();
+    if allowed_ports.is_empty() {
+        return None;
+    }
 
     let mut blocked_ranges = Vec::new();
     let mut start = 1_u32;
@@ -740,6 +749,11 @@ mod tests {
     }
 
     #[test]
+    fn empty_proxy_port_set_uses_the_broad_tcp_block() {
+        assert_eq!(blocked_loopback_tcp_remote_ports(&[]), None);
+    }
+
+    #[test]
     fn configured_remote_address_literals_are_accepted_by_firewall_com() {
         let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
         assert!(hr.is_ok(), "CoInitializeEx failed: {hr:?}");
@@ -780,6 +794,7 @@ mod tests {
         let offline_sid = "S-1-5-18";
         let blocked_remote_ports =
             blocked_loopback_tcp_remote_ports(&[8080]).expect("proxy-port complement should exist");
+        let broad_tcp_remote_ports = blocked_loopback_tcp_remote_ports(&[]);
         let specs = [
             BlockRuleSpec {
                 internal_name: OFFLINE_BLOCK_LOOPBACK_UDP_RULE_NAME,
@@ -798,6 +813,15 @@ mod tests {
                 offline_sid,
                 remote_addresses: Some(LOOPBACK_REMOTE_ADDRESSES),
                 remote_ports: Some(&blocked_remote_ports),
+            },
+            BlockRuleSpec {
+                internal_name: OFFLINE_BLOCK_LOOPBACK_TCP_RULE_NAME,
+                friendly_desc: OFFLINE_BLOCK_LOOPBACK_TCP_RULE_FRIENDLY,
+                protocol: NET_FW_IP_PROTOCOL_TCP.0,
+                local_user_spec,
+                offline_sid,
+                remote_addresses: Some(LOOPBACK_REMOTE_ADDRESSES),
+                remote_ports: broad_tcp_remote_ports.as_deref(),
             },
             BlockRuleSpec {
                 internal_name: OFFLINE_BLOCK_RULE_NAME,

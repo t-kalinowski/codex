@@ -11,6 +11,10 @@ use std::io::Read;
 use std::io::Write;
 use std::net::TcpListener;
 use std::os::fd::AsRawFd;
+#[cfg(target_os = "linux")]
+use std::os::fd::FromRawFd;
+#[cfg(target_os = "linux")]
+use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
@@ -834,17 +838,7 @@ fn packaged_bwrap_compatibility_retires_a_pipe_holding_descendant() {
         .expect("read compatibility descendant process ID")
         .parse::<i32>()
         .expect("compatibility descendant process ID");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    while unsafe { libc::kill(descendant_process_id, 0) } == 0
-        && std::time::Instant::now() < deadline
-    {
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-    assert_eq!(unsafe { libc::kill(descendant_process_id, 0) }, -1);
-    assert_eq!(
-        std::io::Error::last_os_error().raw_os_error(),
-        Some(libc::ESRCH)
-    );
+    wait_for_linux_process_exit(descendant_process_id, std::time::Duration::from_secs(2));
 }
 
 #[test]
@@ -2565,6 +2559,8 @@ fn control_loss_interrupts_root_exit_grace_for_remaining_descendants() {
         .expect("read descendant host process ID");
     let descendant_process_id =
         i32::try_from(u32::from_be_bytes(descendant_process_id)).expect("descendant process ID");
+    #[cfg(target_os = "linux")]
+    let descendant_process = open_linux_process(descendant_process_id);
     let root_exit_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     loop {
         let status = runner.request(json!({
@@ -2584,17 +2580,22 @@ fn control_loss_interrupts_root_exit_grace_for_remaining_descendants() {
     runner.close_control();
     assert!(runner.wait_for_exit().success());
     assert!(started.elapsed() < std::time::Duration::from_secs(3));
-    let retirement_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    while unsafe { libc::kill(descendant_process_id, 0) } == 0
-        && std::time::Instant::now() < retirement_deadline
+    #[cfg(target_os = "linux")]
+    wait_for_linux_process_handle_exit(&descendant_process, std::time::Duration::from_secs(2));
+    #[cfg(not(target_os = "linux"))]
     {
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        let retirement_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while unsafe { libc::kill(descendant_process_id, 0) } == 0
+            && std::time::Instant::now() < retirement_deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(unsafe { libc::kill(descendant_process_id, 0) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
     }
-    assert_eq!(unsafe { libc::kill(descendant_process_id, 0) }, -1);
-    assert_eq!(
-        std::io::Error::last_os_error().raw_os_error(),
-        Some(libc::ESRCH)
-    );
 }
 
 #[test]
@@ -2920,6 +2921,40 @@ fn write_linux_companion(directory: &Path, name: &str, body: &str) -> std::path:
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
         .expect("make companion fixture executable");
     path
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for_linux_process_exit(process_id: i32, timeout: std::time::Duration) {
+    let process = open_linux_process(process_id);
+    wait_for_linux_process_handle_exit(&process, timeout);
+}
+
+#[cfg(target_os = "linux")]
+fn open_linux_process(process_id: i32) -> OwnedFd {
+    let descriptor = unsafe { libc::syscall(libc::SYS_pidfd_open, process_id, /*flags*/ 0) };
+    assert!(
+        descriptor >= 0,
+        "open process {process_id}: {}",
+        std::io::Error::last_os_error()
+    );
+    unsafe { OwnedFd::from_raw_fd(descriptor as i32) }
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for_linux_process_handle_exit(process: &OwnedFd, timeout: std::time::Duration) {
+    let timeout_ms = i32::try_from(timeout.as_millis()).expect("process-exit timeout milliseconds");
+    let mut descriptor = libc::pollfd {
+        fd: process.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    assert_eq!(
+        unsafe { libc::poll(&mut descriptor, /*nfds*/ 1, timeout_ms) },
+        1,
+        "process did not exit before {timeout:?}: {}",
+        std::io::Error::last_os_error()
+    );
+    assert_ne!(descriptor.revents & libc::POLLIN, 0);
 }
 
 #[cfg(target_os = "macos")]

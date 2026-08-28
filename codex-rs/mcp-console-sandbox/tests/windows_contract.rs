@@ -547,7 +547,7 @@ fn launch_grants_only_the_exact_target_executable_read() {
         rules.clone(),
         json!({ "mode": "denied" }),
     ));
-    assert_eq!(setup["type"], "setup_completed");
+    assert_eq!(setup["type"], "setup_completed", "{setup}");
     let launch = runner.request(launch_request_with_policy(
         2,
         &workspace,
@@ -608,7 +608,7 @@ fn helper_ready_loss_consumes_the_generation_without_executing_the_target() {
 
 #[test]
 fn runner_owned_undeclared_handle_is_rejected_before_policy_preparation() {
-    let executable = RunnerExecutable::without_companions();
+    let executable = RunnerExecutable::with_companions();
     let root = TempDir::new().expect("policy root");
     let state = root.path().join("state");
     std::fs::create_dir(&state).expect("state directory");
@@ -722,16 +722,16 @@ fn native_setup_launch_streams_and_retirement() {
         Some("ready" | "administrative_action_required")
     ));
     let prepared = runner.request(setup_operation(11, "prepare", &workspace));
-    assert_eq!(prepared["type"], "setup_completed");
+    assert_eq!(prepared["type"], "setup_completed", "{prepared}");
     assert!(matches!(
         prepared["operation"].as_str(),
         Some("prepared" | "already_ready")
     ));
     let idempotent = runner.request(setup_operation(12, "prepare", &workspace));
-    assert_eq!(idempotent["type"], "setup_completed");
+    assert_eq!(idempotent["type"], "setup_completed", "{idempotent}");
     assert_eq!(idempotent["operation"], "already_ready");
     let refreshed = runner.request(setup_operation(13, "refresh", &workspace));
-    assert_eq!(refreshed["type"], "setup_completed");
+    assert_eq!(refreshed["type"], "setup_completed", "{refreshed}");
     assert_eq!(refreshed["operation"], "refreshed");
     let accepted = runner.request(launch_request(14, &workspace, null_streams()));
     assert_eq!(accepted["type"], "launch_accepted");
@@ -1357,7 +1357,7 @@ fn exercise_private_desktop(
         "windows": { "private_desktop": true },
     });
     let response = runner.request(setup);
-    assert_eq!(response["type"], "setup_completed");
+    assert_eq!(response["type"], "setup_completed", "{response}");
     let mut launch = launch_request(2, workspace, null_streams());
     launch["launch"]["platform_extensions"] = json!({
         "windows": { "private_desktop": true },

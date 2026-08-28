@@ -1,55 +1,24 @@
 # MCP Console sandbox runner
 
-`mcp-console-sandbox` is a private executable that exposes this Codex
-release's native sandboxes to MCP Console through an explicitly versioned
-machine protocol. It is not a user-facing command, is not published to
-crates.io, and must not be installed on a user's normal `PATH`.
+`mcp-console-sandbox` is a private executable that exposes this Codex release's native sandboxes to MCP Console through an explicitly versioned machine protocol. It is not a user-facing command, is not published to crates.io, and must not be installed on a user's normal `PATH`.
 
-The executable and [protocol](PROTOCOL.md) are the downstream contract. MCP
-Console does not link this crate or any other Codex crate into its main Cargo
-dependency graph.
+The executable and [protocol](PROTOCOL.md) are the downstream contract. MCP Console does not link this crate or any other Codex crate into its main Cargo dependency graph.
 
 ## Backends
 
 The runner has no unsandboxed backend and no unsandboxed fallback.
 
-| Platform | Native implementation | Process ownership |
-| --- | --- | --- |
-| macOS | Codex Seatbelt policy construction through `/usr/bin/sandbox-exec` | One Unix process group, with bounded descendant retirement; descendants that deliberately leave the group are not claimed |
-| Linux | Codex bubblewrap helper, user/PID/IPC namespaces, seccomp, synthetic mounts, and proxy routing | Bubblewrap PID namespace plus process-group supervision and a parent-death watchdog |
-| Windows | Codex standalone restricted identity, ACL/WFP setup, elevated command helper, and non-breakaway Job Object | Job-owned target tree with kill-on-close retirement |
+| Platform | Native implementation                                                                                      | Process ownership                                                                                                         |
+| -------- | ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| macOS    | Codex Seatbelt policy construction through `/usr/bin/sandbox-exec`                                         | One Unix process group, with bounded descendant retirement; descendants that deliberately leave the group are not claimed |
+| Linux    | Codex bubblewrap helper, user/PID/IPC namespaces, seccomp, synthetic mounts, and proxy routing             | Bubblewrap PID namespace plus process-group supervision and a parent-death watchdog                                       |
+| Windows  | Codex standalone restricted identity, ACL/WFP setup, elevated command helper, and non-breakaway Job Object | Job-owned target tree with kill-on-close retirement                                                                       |
 
-On macOS and Linux, the target is launched through a private in-sandbox
-self-reexecution bridge and target-exec shim. The shim remains blocked after it
-reports ready until the outer runner has installed supervision, transferred
-infrastructure ownership, and committed the launch. A close-on-exec status
-channel confirms native target-exec success before the runner sends
-`launch_accepted`; the bridge then projects the target's exit code or Unix
-terminating signal to the outer supervisor. macOS reports the host-visible
-target PID. Linux returns no root PID because the reported value is local to
-bubblewrap's PID namespace. Private bridge status is separate from both the
-public control channel and the target's application streams.
+On macOS and Linux, the target is launched through a private in-sandbox self-reexecution bridge and target-exec shim. The shim remains blocked after it reports ready until the outer runner has installed supervision, transferred infrastructure ownership, and committed the launch. A close-on-exec status channel confirms native target-exec success before the runner sends `launch_accepted`; the bridge then projects the target's exit code or Unix terminating signal to the outer supervisor. macOS reports the host-visible target PID. Linux returns no root PID because the reported value is local to bubblewrap's PID namespace. Private bridge status is separate from both the public control channel and the target's application streams.
 
-Windows support uses the release-local standalone sandbox facade. Setup is
-explicit and policy-dependent: the online identity is used for unrestricted
-networking, while denied and managed-proxy networking use the WFP-confined
-offline identity. Those identities, their group, firewall rules, WFP filters,
-and setup mutexes use a fixed MCP Console namespace distinct from ordinary
-Codex setup. The command helper owns a non-breakaway, kill-on-close Job Object
-and reports root exit separately from full-job retirement. Windows does not
-resume the suspended target until the runner has received `Ready`, installed
-supervision, released unnecessary stream copies, and sent `CommitLaunch`.
-`launch_accepted` follows the helper's `Committed` acknowledgement. Windows
-does not claim Unix-style interrupt, graceful signal projection, ConPTY
-creation, or terminal-device isolation. Its launch `terminate_grace_ms` and
-explicit terminate `graceful_ms` must therefore both be zero.
+Windows support uses the release-local standalone sandbox facade. Setup is explicit and policy-dependent: the online identity is used for unrestricted networking, while denied and managed-proxy networking use the WFP-confined offline identity. Those identities, their group, firewall rules, WFP filters, and setup mutexes use a fixed MCP Console namespace distinct from ordinary Codex setup. The command helper owns a non-breakaway, kill-on-close Job Object and reports root exit separately from full-job retirement. Windows does not resume the suspended target until the runner has received `Ready`, installed supervision, released unnecessary stream copies, and sent `CommitLaunch`. `launch_accepted` follows the helper's `Committed` acknowledgement. Windows does not claim Unix-style interrupt, graceful signal projection, ConPTY creation, or terminal-device isolation. Its launch `terminate_grace_ms` and explicit terminate `graceful_ms` must therefore both be zero.
 
-Linux keeps bubblewrap's isolated session boundary. It does not project
-SIGINT or SIGTERM into the target namespace, so its launch
-`terminate_grace_ms` and explicit terminate `graceful_ms` must also be zero.
-Explicit termination is forced. Natural root exit still honors
-`root_exit_grace_ms` before force-retiring any remaining namespace
-descendants.
+Linux keeps bubblewrap's isolated session boundary. It does not project SIGINT or SIGTERM into the target namespace, so its launch `terminate_grace_ms` and explicit terminate `graceful_ms` must also be zero. Explicit termination is forced. Natural root exit still honors `root_exit_grace_ms` before force-retiring any remaining namespace descendants.
 
 ## Build
 
@@ -64,18 +33,9 @@ cargo build \
   --release
 ```
 
-The build must stamp a full 40-hex Codex source revision. From a Git checkout,
-the build script reads `HEAD`; a source-archive build must supply the same
-immutable revision through `STABLE_GIT_COMMIT`. The build fails if neither is
-available or if the value is not a full SHA.
+The build must stamp a full 40-hex Codex source revision. From a Git checkout, the build script reads `HEAD`; a source-archive build must supply the same immutable revision through `STABLE_GIT_COMMIT`. The build fails if neither is available or if the value is not a full SHA.
 
-The Bazel executable target is
-`//codex-rs/mcp-console-sandbox:mcp-console-sandbox`. Every Bazel command that
-builds or tests this runner must use `--config=mcp-console-sandbox`; the opt-in
-configuration stamps the current full Git revision and the workspace release
-version used by the Windows compatibility tokens. An unstamped runner fails to
-compile.
-Build the companion target for the selected platform from the same revision:
+The Bazel executable target is `//codex-rs/mcp-console-sandbox:mcp-console-sandbox`. Every Bazel command that builds or tests this runner must use `--config=mcp-console-sandbox`; the opt-in configuration stamps the current full Git revision and the workspace release version used by the Windows compatibility tokens. An unstamped runner fails to compile. Build the companion target for the selected platform from the same revision:
 
 ```console
 # Linux
@@ -92,12 +52,9 @@ bazel build \
   //codex-rs/windows-sandbox-rs/no-telemetry:codex-command-runner
 ```
 
-The leaf `BUILD.bazel` exposes these binaries as contract-test runfiles. It
-does not create an installer or a libexec package; MCP Console remains
-responsible for copying the selected artifacts into the layout below.
+The leaf `BUILD.bazel` exposes these binaries as contract-test runfiles. It does not create an installer or a libexec package; MCP Console remains responsible for copying the selected artifacts into the layout below.
 
-Build the platform companion from the same checkout when packaging a Cargo
-artifact:
+Build the platform companion from the same checkout when packaging a Cargo artifact:
 
 ```console
 # Linux
@@ -113,23 +70,13 @@ cargo build \
   --release
 ```
 
-Building this package does not intentionally build or ship the Codex CLI, TUI,
-app server, model clients, authentication, sessions, history, or MCP servers.
-Cargo disables the Windows dependency's default telemetry feature. Bazel uses
-private feature-free runner, sandboxing, Linux, Windows, and helper build edges
-while leaving normal Codex targets telemetry-enabled. The focused graph has no
-`codex-otel`, `codex-api`, or `codex-client` edge. Its low-level
-`codex-protocol` dependency does transitively compile generic
-`codex-http-client` and upstream OpenTelemetry support, but this executable
-does not initialize or use them.
+Building this package does not intentionally build or ship the Codex CLI, TUI, app server, model clients, authentication, sessions, history, or MCP servers. Cargo disables the Windows dependency's default telemetry feature. Bazel uses private feature-free runner, sandboxing, Linux, Windows, and helper build edges while leaving normal Codex targets telemetry-enabled. The focused graph has no `codex-otel`, `codex-api`, or `codex-client` edge. Its low-level `codex-protocol` dependency does transitively compile generic `codex-http-client` and upstream OpenTelemetry support, but this executable does not initialize or use them.
 
-`mcp-console-sandbox-fixture` is an executable-level contract-test fixture. It
-is not a companion resource and must not be included in a runtime package.
+`mcp-console-sandbox-fixture` is an executable-level contract-test fixture. It is not a companion resource and must not be included in a runtime package.
 
 ## Private installation layout
 
-MCP Console stages the runner and same-revision companions in one immutable
-private libexec directory:
+MCP Console stages the runner and same-revision companions in one immutable private libexec directory:
 
 ```text
 libexec/
@@ -140,36 +87,13 @@ libexec/
     `-- codex-command-runner.exe           # Windows only
 ```
 
-Linux constructs only `<runner-dir>/codex-resources/bwrap`, canonicalizes and
-validates that executable, and never consults `PATH` in embedding mode. The
-focused runner self-reexecutes with the reserved `codex-linux-sandbox`
-invocation name and pins the canonical bubblewrap and state paths in private
-arguments. Before reporting availability or launching a target, it runs a
-bounded private compatibility query and requires the exact private companion
-protocol-2 and Codex-release token with no extra output. This companion ABI is
-independent of the runner's public protocol version 1. A Bazel build
-additionally embeds and verifies the companion digest. Cargo packaging relies
-on the exact layout, closed compatibility token, and immutable
-private-directory trust boundary.
+Linux constructs only `<runner-dir>/codex-resources/bwrap`, canonicalizes and validates that executable, and never consults `PATH` in embedding mode. The focused runner self-reexecutes with the reserved `codex-linux-sandbox` invocation name and pins the canonical bubblewrap and state paths in private arguments. Before reporting availability or launching a target, it runs a bounded private compatibility query and requires the exact private companion protocol-2 and Codex-release token with no extra output. This companion ABI is independent of the runner's public protocol version 1. A Bazel build additionally embeds and verifies the companion digest. Cargo packaging relies on the exact layout, closed compatibility token, and immutable private-directory trust boundary.
 
-Windows constructs the two exact paths shown above. The files must be sibling
-resources under `codex-resources`, use the exact names, and be absolute
-local-disk paths. Neither setup nor launch searches `PATH`. Before reporting
-operational capabilities, running setup, or launching a target, the runner
-executes each exact helper with its own private compatibility query. Each query
-must exit successfully within two seconds, write no stderr, and produce the
-exact helper-specific private ABI-1 and Codex-release token on stdout within
-1,024 bytes. The helpers answer these queries before setup or command-runner
-initialization, so compatibility inspection does not mutate setup state or
-request elevation. This private companion ABI is independent of public runner
-protocol version 1.
+Windows constructs the two exact paths shown above. The files must be sibling resources under `codex-resources`, use the exact names, and be absolute local-disk paths. Neither setup nor launch searches `PATH`. Before reporting operational capabilities, running setup, or launching a target, the runner executes each exact helper with its own private compatibility query. Each query must exit successfully within two seconds, write no stderr, and produce the exact helper-specific private ABI-1 and Codex-release token on stdout within 1,024 bytes. The helpers answer these queries before setup or command-runner initialization, so compatibility inspection does not mutate setup state or request elevation. This private companion ABI is independent of public runner protocol version 1.
 
 ## Embedding flow
 
-The caller creates a private bidirectional native channel and makes the runner
-side inheritable into the runner child. It must likewise make every endpoint
-declared by `--stream-fd` or `--stream-handle` inheritable; peer and unrelated
-endpoints remain private to the caller. It then invokes:
+The caller creates a private bidirectional native channel and makes the runner side inheritable into the runner child. It must likewise make every endpoint declared by `--stream-fd` or `--stream-handle` inheritable; peer and unrelated endpoints remain private to the caller. It then invokes:
 
 ```text
 mcp-console-sandbox \

@@ -1,6 +1,7 @@
 use super::setup::WindowsSandboxStandaloneResources;
 use anyhow::Context;
 use anyhow::Result;
+use codex_utils_pty::JobObject;
 use std::ffi::OsString;
 use std::io::Read;
 use std::os::windows::io::AsRawHandle;
@@ -17,6 +18,7 @@ use windows_sys::Win32::Foundation::GetLastError;
 use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::System::Pipes::PeekNamedPipe;
 use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+use windows_sys::Win32::System::Threading::CREATE_SUSPENDED;
 
 const COMPATIBILITY_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_COMPATIBILITY_OUTPUT_BYTES: usize = 1024;
@@ -95,6 +97,8 @@ pub fn verify_windows_sandbox_standalone_resources(
 }
 
 fn verify_helper(path: &Path, helper: WindowsSandboxStandaloneHelperKind) -> Result<()> {
+    let job = JobObject::create_without_breakaway()
+        .context("create packaged Windows helper compatibility Job")?;
     let mut command = Command::new(path);
     command
         .arg(helper.query())
@@ -102,7 +106,7 @@ fn verify_helper(path: &Path, helper: WindowsSandboxStandaloneHelperKind) -> Res
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .creation_flags(CREATE_NO_WINDOW);
+        .creation_flags(CREATE_NO_WINDOW | CREATE_SUSPENDED);
     let mut child = command.spawn().with_context(|| {
         format!(
             "start packaged Windows {} helper compatibility query at {}",
@@ -110,6 +114,8 @@ fn verify_helper(path: &Path, helper: WindowsSandboxStandaloneHelperKind) -> Res
             path.display()
         )
     })?;
+    job.assign_and_resume_std_process(&mut child)
+        .context("contain packaged Windows helper compatibility query")?;
     let mut stdout = child
         .stdout
         .take()
@@ -131,14 +137,14 @@ fn verify_helper(path: &Path, helper: WindowsSandboxStandaloneHelperKind) -> Res
                 read_available(&mut stderr, &mut stderr_bytes, &mut stderr_eof, "stderr")
             })
         {
-            terminate_query(&mut child);
+            terminate_query(&job, &mut child);
             return Err(error);
         }
         if status.is_none() {
             match child.try_wait() {
                 Ok(result) => status = result,
                 Err(error) => {
-                    terminate_query(&mut child);
+                    terminate_query(&job, &mut child);
                     return Err(error).context("inspect packaged Windows helper compatibility query");
                 }
             }
@@ -147,7 +153,7 @@ fn verify_helper(path: &Path, helper: WindowsSandboxStandaloneHelperKind) -> Res
             break;
         }
         if Instant::now() >= deadline {
-            terminate_query(&mut child);
+            terminate_query(&job, &mut child);
             anyhow::bail!(
                 "packaged Windows {} helper compatibility query timed out",
                 helper.label()
@@ -228,7 +234,8 @@ fn require_compatible_output(
     Ok(())
 }
 
-fn terminate_query(child: &mut Child) {
+fn terminate_query(job: &JobObject, child: &mut Child) {
+    let _ = job.terminate();
     let _ = child.kill();
     let _ = child.wait();
 }
