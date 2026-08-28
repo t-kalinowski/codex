@@ -19,6 +19,9 @@ use std::net::Ipv4Addr;
 use std::net::TcpListener;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt;
+use std::path::Path;
+use std::path::PathBuf;
 use std::process::Output;
 use std::process::Stdio;
 use std::time::Duration;
@@ -26,6 +29,8 @@ use tempfile::NamedTempFile;
 use tokio::process::Command;
 
 const BWRAP_UNAVAILABLE_ERR: &str = "bubblewrap is unavailable: no system bwrap was found";
+const BWRAP_COMPATIBILITY_QUERY: &str = "--codex-mcp-console-sandbox-bwrap-compatibility-v2";
+const BWRAP_FIXTURE_TARGET_ENV: &str = "CODEX_TEST_PACKAGED_BWRAP";
 const NETWORK_TIMEOUT_MS: u64 = 4_000;
 const MANAGED_PROXY_PERMISSION_ERR_SNIPPETS: &[&str] = &[
     "loopback: Failed RTM_NEWADDR",
@@ -53,6 +58,28 @@ const PROXY_ENV_KEYS: &[&str] = &[
     "DOCKER_HTTP_PROXY",
     "DOCKER_HTTPS_PROXY",
 ];
+
+#[ctor::ctor]
+fn dispatch_query_refusing_bwrap_fixture() {
+    let mut arguments = std::env::args_os();
+    let is_fixture = arguments
+        .next()
+        .as_deref()
+        .and_then(|arg0| Path::new(arg0).file_name())
+        .is_some_and(|name| name == "bwrap");
+    if !is_fixture {
+        return;
+    }
+
+    let arguments = arguments.collect::<Vec<_>>();
+    if arguments.len() == 1 && arguments[0] == BWRAP_COMPATIBILITY_QUERY {
+        std::process::exit(93);
+    }
+    let target =
+        std::env::var_os(BWRAP_FIXTURE_TARGET_ENV).expect("query-refusing bwrap fixture target");
+    let error = std::process::Command::new(target).args(arguments).exec();
+    panic!("failed to exec packaged bubblewrap from fixture: {error}");
+}
 
 fn create_env_from_core_vars() -> HashMap<String, String> {
     let policy = ShellEnvironmentPolicy::default();
@@ -305,12 +332,34 @@ async fn unsupported_system_bwrap_falls_back_to_bundled_bwrap() {
         return;
     }
 
-    let Some(system_bwrap) = codex_sandboxing::find_system_bwrap_in_path() else {
-        eprintln!("skipping system bwrap fallback test: no system bubblewrap is available");
+    let packaged_bwrap = std::env::var_os("CARGO_BIN_EXE_bwrap")
+        .map(PathBuf::from)
+        .map(|path| {
+            if path.is_absolute() {
+                path
+            } else {
+                std::env::var_os("TEST_SRCDIR")
+                    .map(PathBuf::from)
+                    .map(|root| root.join(&path))
+                    .unwrap_or(path)
+            }
+        })
+        .or_else(|| {
+            PathBuf::from(env!("CARGO_BIN_EXE_codex-linux-sandbox"))
+                .parent()
+                .map(|target_dir| target_dir.join("bwrap"))
+        });
+    let Some(packaged_bwrap) = packaged_bwrap.filter(|path| path.is_file()) else {
+        eprintln!("skipping system bwrap fallback test: compatible packaged bwrap is unavailable");
         return;
     };
 
-    let tempdir = tempfile::tempdir().expect("create isolated sandbox installation");
+    let current_test_executable = std::env::current_exe().expect("current test executable");
+    let test_executable_dir = current_test_executable
+        .parent()
+        .expect("test executable directory");
+    let tempdir = tempfile::tempdir_in(test_executable_dir)
+        .expect("create isolated sandbox installation beside test executable");
     let sandbox_executable = tempdir.path().join("codex-linux-sandbox");
     let original_executable = env!("CARGO_BIN_EXE_codex-linux-sandbox");
     if std::fs::hard_link(original_executable, &sandbox_executable).is_err() {
@@ -319,8 +368,22 @@ async fn unsupported_system_bwrap_falls_back_to_bundled_bwrap() {
 
     let resources_dir = tempdir.path().join("codex-resources");
     std::fs::create_dir(&resources_dir).expect("create bundled resource directory");
-    std::os::unix::fs::symlink(&system_bwrap, resources_dir.join("bwrap"))
-        .expect("install bundled bubblewrap");
+    let bundled_bwrap = resources_dir.join("bwrap");
+    std::fs::hard_link(&current_test_executable, &bundled_bwrap)
+        .expect("install query-refusing bundled bubblewrap fixture");
+    std::fs::set_permissions(&bundled_bwrap, std::fs::Permissions::from_mode(0o755))
+        .expect("make bundled bubblewrap fixture executable");
+    let compatibility = Command::new(&bundled_bwrap)
+        .arg(BWRAP_COMPATIBILITY_QUERY)
+        .env_clear()
+        .output()
+        .await
+        .expect("query bundled bubblewrap fixture compatibility");
+    assert_eq!(
+        compatibility.status.success(),
+        false,
+        "bundled bubblewrap fixture must reject the private embedding query"
+    );
 
     let system_dir = tempdir.path().join("system");
     std::fs::create_dir(&system_dir).expect("create fake system binary directory");
@@ -339,6 +402,13 @@ async fn unsupported_system_bwrap_falls_back_to_bundled_bwrap() {
     env.insert(
         "PATH".to_string(),
         format!("{}:{original_path}", system_dir.display()),
+    );
+    env.insert(
+        BWRAP_FIXTURE_TARGET_ENV.to_string(),
+        packaged_bwrap
+            .to_str()
+            .expect("UTF-8 packaged bubblewrap path")
+            .to_string(),
     );
 
     let cwd = std::env::current_dir().expect("current directory should exist");

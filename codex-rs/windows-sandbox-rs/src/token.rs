@@ -37,14 +37,21 @@ use windows_sys::Win32::Security::TOKEN_USER;
 use windows_sys::Win32::Security::TokenDefaultDacl;
 use windows_sys::Win32::Security::TokenGroups;
 use windows_sys::Win32::Security::TokenUser;
+use windows_sys::Win32::Security::WinRestrictedCodeSid;
+use windows_sys::Win32::Security::WinWorldSid;
 use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
 const DISABLE_MAX_PRIVILEGE: u32 = 0x01;
 const LUA_TOKEN: u32 = 0x04;
 const WRITE_RESTRICTED: u32 = 0x08;
 const GENERIC_ALL: u32 = 0x1000_0000;
-const WIN_WORLD_SID: i32 = 1;
 const SE_GROUP_LOGON_ID: u32 = 0xC0000000;
+
+#[derive(Clone, Copy)]
+enum FinalRestrictingSid {
+    Everyone,
+    RestrictedCode,
+}
 
 #[repr(C)]
 struct TokenDefaultDaclInfo {
@@ -107,16 +114,20 @@ unsafe fn set_default_dacl(h_token: HANDLE, sids: &[*mut c_void]) -> Result<()> 
 }
 
 pub unsafe fn world_sid() -> Result<Vec<u8>> {
+    unsafe { well_known_sid(WinWorldSid) }
+}
+
+unsafe fn well_known_sid(sid_type: i32) -> Result<Vec<u8>> {
     let mut size: u32 = 0;
     CreateWellKnownSid(
-        WIN_WORLD_SID,
+        sid_type,
         std::ptr::null_mut(),
         std::ptr::null_mut(),
         &mut size,
     );
     let mut buf: Vec<u8> = vec![0u8; size as usize];
     let ok = CreateWellKnownSid(
-        WIN_WORLD_SID,
+        sid_type,
         std::ptr::null_mut(),
         buf.as_mut_ptr() as *mut c_void,
         &mut size,
@@ -432,6 +443,33 @@ pub unsafe fn create_readonly_token_with_caps_and_user_from(
     )
 }
 
+/// Creates the standalone runner's target token from the active filesystem
+/// capability SIDs, the session-scoped logon SID, the Restricted Code SID, and
+/// any additional non-filesystem identity SIDs.
+///
+/// The logon SID is required by the window-station and desktop ACLs used during
+/// process initialization. Restricted Code lets the target use Windows objects
+/// whose DACL explicitly admits restricted code. Unlike the existing Codex
+/// constructors, this does not add the token user or Everyone SID to
+/// `SidsToRestrict`; those identities would allow a target to use host object
+/// ACLs unrelated to the normalized filesystem policy.
+///
+/// # Safety
+/// Caller must close the returned token handle; `base_token` must be a valid
+/// primary token and every SID pointer must remain valid for this call.
+pub unsafe fn create_standalone_token_with_caps_from(
+    base_token: HANDLE,
+    psid_capabilities: &[*mut c_void],
+    additional_restricting_sids: &[*mut c_void],
+) -> Result<HANDLE> {
+    create_token_with_caps_from_mode(
+        base_token,
+        psid_capabilities,
+        additional_restricting_sids,
+        FinalRestrictingSid::RestrictedCode,
+    )
+}
+
 unsafe fn create_token_with_caps_user_and_additional_restrictions_from(
     base_token: HANDLE,
     psid_capabilities: &[*mut c_void],
@@ -442,13 +480,32 @@ unsafe fn create_token_with_caps_user_and_additional_restrictions_from(
     let mut extra_restricting_sids = Vec::with_capacity(additional_restricting_sids.len() + 1);
     extra_restricting_sids.push(psid_user);
     extra_restricting_sids.extend_from_slice(additional_restricting_sids);
-    create_token_with_caps_from(base_token, psid_capabilities, &extra_restricting_sids)
+    create_token_with_caps_from_mode(
+        base_token,
+        psid_capabilities,
+        &extra_restricting_sids,
+        FinalRestrictingSid::Everyone,
+    )
 }
 
 unsafe fn create_token_with_caps_from(
     base_token: HANDLE,
     psid_capabilities: &[*mut c_void],
     extra_restricting_sids: &[*mut c_void],
+) -> Result<HANDLE> {
+    create_token_with_caps_from_mode(
+        base_token,
+        psid_capabilities,
+        extra_restricting_sids,
+        FinalRestrictingSid::Everyone,
+    )
+}
+
+unsafe fn create_token_with_caps_from_mode(
+    base_token: HANDLE,
+    psid_capabilities: &[*mut c_void],
+    extra_restricting_sids: &[*mut c_void],
+    final_restricting_sid: FinalRestrictingSid,
 ) -> Result<HANDLE> {
     if psid_capabilities.is_empty() {
         return Err(anyhow!("no capability SIDs provided"));
@@ -457,8 +514,13 @@ unsafe fn create_token_with_caps_from(
     let psid_logon = logon_sid_bytes.as_mut_ptr() as *mut c_void;
     let mut everyone = world_sid()?;
     let psid_everyone = everyone.as_mut_ptr() as *mut c_void;
+    let mut restricted_code = well_known_sid(WinRestrictedCodeSid)?;
+    let psid_restricted_code = restricted_code.as_mut_ptr() as *mut c_void;
 
-    // Exact order: Capabilities..., ExtraRestricting..., Logon, Everyone
+    // Existing Codex callers retain their exact order: Capabilities...,
+    // ExtraRestricting..., Logon, Everyone. The standalone runner stops after
+    // the session-scoped logon SID and Restricted Code so broad base identities
+    // cannot widen host authority.
     let mut entries: Vec<SID_AND_ATTRIBUTES> =
         vec![std::mem::zeroed(); psid_capabilities.len() + extra_restricting_sids.len() + 2];
     for (i, psid) in psid_capabilities.iter().enumerate() {
@@ -473,7 +535,10 @@ unsafe fn create_token_with_caps_from(
     let logon_idx = extras_idx + extra_restricting_sids.len();
     entries[logon_idx].Sid = psid_logon;
     entries[logon_idx].Attributes = 0;
-    entries[logon_idx + 1].Sid = psid_everyone;
+    entries[logon_idx + 1].Sid = match final_restricting_sid {
+        FinalRestrictingSid::Everyone => psid_everyone,
+        FinalRestrictingSid::RestrictedCode => psid_restricted_code,
+    };
     entries[logon_idx + 1].Attributes = 0;
 
     let mut new_token: HANDLE = 0;

@@ -124,12 +124,12 @@ pub(crate) fn harden_bridge_process(expected_parent_pid: libc::pid_t) -> io::Res
     codex_process_hardening::disable_process_dumping()
 }
 
-fn set_parent_death_signal(expected_parent_pid: libc::pid_t) -> io::Result<()> {
+pub(crate) fn set_parent_death_signal(expected_parent_pid: libc::pid_t) -> io::Result<()> {
     let res = unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) };
     if res != 0 {
         Err(io::Error::last_os_error())
     } else if unsafe { libc::getppid() } != expected_parent_pid {
-        Err(io::Error::other("parent process already exited"))
+        Err(io::Error::from_raw_os_error(libc::ESRCH))
     } else {
         Ok(())
     }

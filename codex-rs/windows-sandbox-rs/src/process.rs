@@ -3,13 +3,17 @@ use crate::logging;
 use crate::proc_thread_attr::ProcThreadAttributeList;
 use crate::winutil::argv_to_command_line;
 use crate::winutil::format_last_error;
+use crate::winutil::native_argv_to_command_line;
 use crate::winutil::to_wide;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
 use codex_utils_pty::JobObject;
 use std::collections::HashMap;
+use std::ffi::OsStr;
+use std::ffi::OsString;
 use std::ffi::c_void;
+use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::AsRawHandle;
 use std::path::Path;
 use std::ptr;
@@ -27,6 +31,7 @@ use windows_sys::Win32::System::Console::STD_INPUT_HANDLE;
 use windows_sys::Win32::System::Console::STD_OUTPUT_HANDLE;
 use windows_sys::Win32::System::Pipes::CreatePipe;
 use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+use windows_sys::Win32::System::Threading::CREATE_SUSPENDED;
 use windows_sys::Win32::System::Threading::CREATE_UNICODE_ENVIRONMENT;
 use windows_sys::Win32::System::Threading::CreateProcessAsUserW;
 use windows_sys::Win32::System::Threading::EXTENDED_STARTUPINFO_PRESENT;
@@ -67,6 +72,58 @@ pub fn make_env_block(env: &HashMap<String, String>) -> Vec<u16> {
     w
 }
 
+pub(crate) fn make_native_env_block(env: &[(OsString, OsString)]) -> Result<Vec<u16>> {
+    let mut items = Vec::with_capacity(env.len());
+    for (key, value) in env {
+        let key = key.to_str().ok_or_else(|| {
+            anyhow::anyhow!("Windows environment variable name is not valid Unicode")
+        })?;
+        let key_units = key.encode_utf16().collect::<Vec<_>>();
+        let value_units = value.as_os_str().encode_wide().collect::<Vec<_>>();
+        if key_units.is_empty() || key_units.contains(&0) || value_units.contains(&0) {
+            anyhow::bail!("Windows environment contains an empty name or embedded NUL");
+        }
+        if key_units.iter().skip(1).any(|unit| *unit == b'=' as u16) {
+            anyhow::bail!("Windows environment variable name contains '='");
+        }
+        let folded = key.to_uppercase();
+        items.push((folded, key.to_string(), key_units, value_units));
+    }
+    items.sort_by(|(left_folded, left, ..), (right_folded, right, ..)| {
+        left_folded.cmp(right_folded).then(left.cmp(right))
+    });
+    let mut block = Vec::new();
+    for (_, _, key, value) in items {
+        block.extend_from_slice(&key);
+        block.push(b'=' as u16);
+        block.extend_from_slice(&value);
+        block.push(0);
+    }
+    if block.is_empty() {
+        block.push(0);
+    }
+    block.push(0);
+    Ok(block)
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum ProcessJobMode {
+    AllowBreakaway,
+    DenyBreakaway,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum ProcessErrorDetail {
+    IncludeCommand,
+    RedactCommand,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum ProcessStartMode {
+    Running,
+    Suspended,
+}
+
 unsafe fn ensure_inheritable_stdio(si: &mut STARTUPINFOW) -> Result<()> {
     for kind in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
         let h = GetStdHandle(kind);
@@ -99,11 +156,60 @@ pub unsafe fn create_process_as_user(
     console_mode: ConsoleMode,
     use_private_desktop: bool,
 ) -> Result<CreatedProcess> {
-    let cmdline_str = argv_to_command_line(argv);
-    let mut cmdline: Vec<u16> = to_wide(&cmdline_str);
-    let env_block = make_env_block(env_map);
+    let argv_native = argv.iter().map(OsString::from).collect::<Vec<_>>();
+    let env_native = env_map
+        .iter()
+        .map(|(key, value)| (OsString::from(key), OsString::from(value)))
+        .collect::<Vec<_>>();
+    create_process_as_user_native(
+        h_token,
+        /*application_name*/ None,
+        &argv_native,
+        cwd,
+        &env_native,
+        logs_base_dir,
+        stdio,
+        console_mode,
+        use_private_desktop,
+        ProcessJobMode::AllowBreakaway,
+        ProcessErrorDetail::IncludeCommand,
+        ProcessStartMode::Running,
+    )
+}
+
+/// Creates a sandboxed child from native Windows strings.
+///
+/// `application_name` is passed directly to `CreateProcessAsUserW`; standalone
+/// callers use an absolute value so Windows never performs executable lookup.
+#[allow(clippy::too_many_arguments)]
+pub(crate) unsafe fn create_process_as_user_native(
+    h_token: HANDLE,
+    application_name: Option<&OsStr>,
+    argv: &[OsString],
+    cwd: &Path,
+    env: &[(OsString, OsString)],
+    logs_base_dir: Option<&Path>,
+    stdio: Option<(HANDLE, HANDLE, HANDLE)>,
+    console_mode: ConsoleMode,
+    use_private_desktop: bool,
+    job_mode: ProcessJobMode,
+    error_detail: ProcessErrorDetail,
+    start_mode: ProcessStartMode,
+) -> Result<CreatedProcess> {
+    if argv.is_empty() {
+        anyhow::bail!("Windows process command must include argv[0]");
+    }
+    let mut cmdline = native_argv_to_command_line(argv)?;
+    let env_block = make_native_env_block(env)?;
+    let application_name = application_name.map(to_wide);
     let desktop = LaunchDesktop::prepare(use_private_desktop, logs_base_dir)?;
-    let job = Arc::new(JobObject::create().context("create process job")?);
+    let job = Arc::new(
+        match job_mode {
+            ProcessJobMode::AllowBreakaway => JobObject::create(),
+            ProcessJobMode::DenyBreakaway => JobObject::create_without_breakaway(),
+        }
+        .context("create process job")?,
+    );
     let mut pi: PROCESS_INFORMATION = std::mem::zeroed();
     let cwd_wide = to_wide(cwd);
     let env_block_len = env_block.len();
@@ -149,10 +255,17 @@ pub unsafe fn create_process_as_user(
     }
     si.lpAttributeList = attrs.as_mut_ptr();
 
-    let creation_flags = CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT | console_flags;
+    let start_flags = match start_mode {
+        ProcessStartMode::Running => 0,
+        ProcessStartMode::Suspended => CREATE_SUSPENDED,
+    };
+    let creation_flags =
+        CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT | console_flags | start_flags;
     let ok = CreateProcessAsUserW(
         h_token,
-        std::ptr::null(),
+        application_name
+            .as_ref()
+            .map_or(std::ptr::null(), Vec::as_ptr),
         cmdline.as_mut_ptr(),
         std::ptr::null_mut(),
         std::ptr::null_mut(),
@@ -165,12 +278,22 @@ pub unsafe fn create_process_as_user(
     );
     if ok == 0 {
         let err = GetLastError() as i32;
+        let command = match error_detail {
+            ProcessErrorDetail::IncludeCommand => {
+                let command = argv
+                    .iter()
+                    .map(|argument| argument.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>();
+                format!(" | cmd={}", argv_to_command_line(&command))
+            }
+            ProcessErrorDetail::RedactCommand => String::new(),
+        };
         let msg = format!(
-            "CreateProcessAsUserW failed: {} ({}) | cwd={} | cmd={} | env_u16_len={} | si_flags={} | creation_flags={}",
+            "CreateProcessAsUserW failed: {} ({}) | cwd={}{} | env_u16_len={} | si_flags={} | creation_flags={}",
             err,
             format_last_error(err),
             cwd.display(),
-            cmdline_str,
+            command,
             env_block_len,
             si.StartupInfo.dwFlags,
             creation_flags,

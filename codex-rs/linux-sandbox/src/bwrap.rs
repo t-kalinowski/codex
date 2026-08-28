@@ -106,7 +106,15 @@ impl BwrapNetworkMode {
 
 #[derive(Debug)]
 pub(crate) struct BwrapArgs {
-    pub args: Vec<String>,
+    pub args: Vec<OsString>,
+    pub preserved_files: Vec<File>,
+    pub synthetic_mount_targets: Vec<SyntheticMountTarget>,
+    pub protected_create_targets: Vec<ProtectedCreateTarget>,
+}
+
+#[derive(Debug)]
+struct BwrapFilesystemArgs {
+    args: Vec<String>,
     pub preserved_files: Vec<File>,
     pub synthetic_mount_targets: Vec<SyntheticMountTarget>,
     pub protected_create_targets: Vec<ProtectedCreateTarget>,
@@ -232,13 +240,17 @@ impl SyntheticMountTarget {
 /// returns `command` unchanged so we avoid unnecessary sandboxing overhead.
 /// If network isolation is requested, we still wrap with bubblewrap so network
 /// namespace restrictions apply while preserving full filesystem access.
-pub(crate) fn create_bwrap_command_args(
-    command: Vec<String>,
+pub(crate) fn create_bwrap_command_args<T>(
+    command: Vec<T>,
     file_system_sandbox_policy: &FileSystemSandboxPolicy,
     sandbox_policy_cwd: &Path,
     command_cwd: &Path,
     options: BwrapOptions,
-) -> Result<BwrapArgs> {
+) -> Result<BwrapArgs>
+where
+    T: Into<OsString>,
+{
+    let command = command.into_iter().map(Into::into).collect();
     let unreadable_globs =
         file_system_sandbox_policy.get_unreadable_globs_with_cwd(sandbox_policy_cwd);
     // Full disk write normally skips bwrap, but unreadable glob patterns still
@@ -265,7 +277,7 @@ pub(crate) fn create_bwrap_command_args(
     )
 }
 
-fn create_bwrap_flags_full_filesystem(command: Vec<String>, options: BwrapOptions) -> BwrapArgs {
+fn create_bwrap_flags_full_filesystem(command: Vec<OsString>, options: BwrapOptions) -> BwrapArgs {
     let mut args = vec![
         "--new-session".to_string(),
         "--die-with-parent".to_string(),
@@ -295,6 +307,7 @@ fn create_bwrap_flags_full_filesystem(command: Vec<String>, options: BwrapOption
     args.push("--cap-drop".to_string());
     args.push("ALL".to_string());
     args.push("--".to_string());
+    let mut args: Vec<OsString> = args.into_iter().map(OsString::from).collect();
     args.extend(command);
     BwrapArgs {
         args,
@@ -306,13 +319,13 @@ fn create_bwrap_flags_full_filesystem(command: Vec<String>, options: BwrapOption
 
 /// Build the bubblewrap flags (everything after `argv[0]`).
 fn create_bwrap_flags(
-    command: Vec<String>,
+    command: Vec<OsString>,
     file_system_sandbox_policy: &FileSystemSandboxPolicy,
     sandbox_policy_cwd: &Path,
     command_cwd: &Path,
     options: BwrapOptions,
 ) -> Result<BwrapArgs> {
-    let BwrapArgs {
+    let BwrapFilesystemArgs {
         args: filesystem_args,
         preserved_files,
         synthetic_mount_targets,
@@ -353,6 +366,7 @@ fn create_bwrap_flags(
     args.push("--cap-drop".to_string());
     args.push("ALL".to_string());
     args.push("--".to_string());
+    let mut args: Vec<OsString> = args.into_iter().map(OsString::from).collect();
     args.extend(command);
     Ok(BwrapArgs {
         args,
@@ -382,7 +396,7 @@ fn create_filesystem_args(
     file_system_sandbox_policy: &FileSystemSandboxPolicy,
     cwd: &Path,
     glob_scan_max_depth: Option<usize>,
-) -> Result<BwrapArgs> {
+) -> Result<BwrapFilesystemArgs> {
     let unreadable_globs = file_system_sandbox_policy.get_unreadable_globs_with_cwd(cwd);
     // Bubblewrap requires bind mount targets to exist. Skip missing writable
     // roots so mixed-platform configs can keep harmless paths for other
@@ -524,7 +538,7 @@ fn create_filesystem_args(
 
         args
     };
-    let mut bwrap_args = BwrapArgs {
+    let mut bwrap_args = BwrapFilesystemArgs {
         args,
         preserved_files: Vec::new(),
         synthetic_mount_targets: Vec::new(),
@@ -660,7 +674,7 @@ fn create_filesystem_args(
 }
 
 fn append_protected_create_targets_for_writable_root(
-    bwrap_args: &mut BwrapArgs,
+    bwrap_args: &mut BwrapFilesystemArgs,
     protected_metadata_names: &[String],
     root: &Path,
     symlink_target: Option<&Path>,
@@ -1020,7 +1034,7 @@ fn append_mount_target_parent_dir_args(args: &mut Vec<String>, mount_target: &Pa
 }
 
 fn append_read_only_subpath_args(
-    bwrap_args: &mut BwrapArgs,
+    bwrap_args: &mut BwrapFilesystemArgs,
     subpath: &Path,
     allowed_write_paths: &[PathBuf],
 ) -> Result<()> {
@@ -1072,7 +1086,10 @@ fn append_read_only_subpath_args(
     Ok(())
 }
 
-fn append_empty_file_bind_data_args(bwrap_args: &mut BwrapArgs, path: &Path) -> Result<()> {
+fn append_empty_file_bind_data_args(
+    bwrap_args: &mut BwrapFilesystemArgs,
+    path: &Path,
+) -> Result<()> {
     if bwrap_args.preserved_files.is_empty() {
         bwrap_args.preserved_files.push(File::open("/dev/null")?);
     }
@@ -1083,7 +1100,7 @@ fn append_empty_file_bind_data_args(bwrap_args: &mut BwrapArgs, path: &Path) -> 
     Ok(())
 }
 
-fn append_empty_directory_args(bwrap_args: &mut BwrapArgs, path: &Path) {
+fn append_empty_directory_args(bwrap_args: &mut BwrapFilesystemArgs, path: &Path) {
     bwrap_args.args.push("--perms".to_string());
     bwrap_args.args.push("555".to_string());
     bwrap_args.args.push("--tmpfs".to_string());
@@ -1092,7 +1109,10 @@ fn append_empty_directory_args(bwrap_args: &mut BwrapArgs, path: &Path) {
     bwrap_args.args.push(path_to_string(path));
 }
 
-fn append_missing_read_only_subpath_args(bwrap_args: &mut BwrapArgs, path: &Path) -> Result<()> {
+fn append_missing_read_only_subpath_args(
+    bwrap_args: &mut BwrapFilesystemArgs,
+    path: &Path,
+) -> Result<()> {
     if path.file_name().is_some_and(is_protected_metadata_name) {
         append_empty_directory_args(bwrap_args, path);
         bwrap_args
@@ -1104,7 +1124,10 @@ fn append_missing_read_only_subpath_args(bwrap_args: &mut BwrapArgs, path: &Path
     append_missing_empty_file_bind_data_args(bwrap_args, path)
 }
 
-fn append_missing_empty_file_bind_data_args(bwrap_args: &mut BwrapArgs, path: &Path) -> Result<()> {
+fn append_missing_empty_file_bind_data_args(
+    bwrap_args: &mut BwrapFilesystemArgs,
+    path: &Path,
+) -> Result<()> {
     append_empty_file_bind_data_args(bwrap_args, path)?;
     bwrap_args
         .synthetic_mount_targets
@@ -1113,7 +1136,7 @@ fn append_missing_empty_file_bind_data_args(bwrap_args: &mut BwrapArgs, path: &P
 }
 
 fn append_existing_empty_file_bind_data_args(
-    bwrap_args: &mut BwrapArgs,
+    bwrap_args: &mut BwrapFilesystemArgs,
     path: &Path,
     metadata: &Metadata,
 ) -> Result<()> {
@@ -1125,7 +1148,7 @@ fn append_existing_empty_file_bind_data_args(
 }
 
 fn append_existing_empty_directory_args(
-    bwrap_args: &mut BwrapArgs,
+    bwrap_args: &mut BwrapFilesystemArgs,
     path: &Path,
     metadata: &Metadata,
 ) {
@@ -1138,7 +1161,7 @@ fn append_existing_empty_directory_args(
 }
 
 fn append_unreadable_root_args(
-    bwrap_args: &mut BwrapArgs,
+    bwrap_args: &mut BwrapFilesystemArgs,
     unreadable_root: &Path,
     allowed_write_paths: &[PathBuf],
 ) -> Result<()> {
@@ -1172,7 +1195,7 @@ fn append_unreadable_root_args(
 }
 
 fn append_existing_unreadable_path_args(
-    bwrap_args: &mut BwrapArgs,
+    bwrap_args: &mut BwrapFilesystemArgs,
     unreadable_root: &Path,
     allowed_write_paths: &[PathBuf],
 ) -> Result<()> {
@@ -1361,7 +1384,7 @@ mod tests {
 
     #[test]
     fn full_disk_write_full_network_returns_unwrapped_command() {
-        let command = vec!["/bin/true".to_string()];
+        let command = vec![OsString::from("/bin/true")];
         let args = create_bwrap_command_args(
             command.clone(),
             &FileSystemSandboxPolicy::unrestricted(),
@@ -1376,6 +1399,29 @@ mod tests {
         .expect("create bwrap args");
 
         assert_eq!(args.args, command);
+    }
+
+    #[test]
+    fn bwrap_argv_preserves_native_command_arguments() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let native_argument = OsString::from_vec(vec![b'a', b'r', b'g', 0x80]);
+        let command = vec![OsString::from("/bin/echo"), native_argument];
+        let args = create_bwrap_command_args(
+            command.clone(),
+            &FileSystemSandboxPolicy::read_only(),
+            Path::new("/"),
+            Path::new("/"),
+            BwrapOptions {
+                mount_proc: true,
+                network_mode: BwrapNetworkMode::FullAccess,
+                ..Default::default()
+            },
+        )
+        .expect("create bwrap args");
+
+        assert_eq!(args.args[args.args.len() - 2..], command);
     }
 
     #[test]
@@ -1418,6 +1464,9 @@ mod tests {
                 "--".to_string(),
                 "/bin/true".to_string(),
             ]
+            .into_iter()
+            .map(OsString::from)
+            .collect::<Vec<_>>()
         );
     }
 
@@ -1440,7 +1489,7 @@ mod tests {
             },
             unreadable_glob_entry(format!("{}/**/*.env", temp_dir.path().display())),
         ]);
-        let command = vec!["/bin/true".to_string()];
+        let command = vec![OsString::from("/bin/true")];
 
         let args = create_bwrap_command_args(
             command.clone(),
@@ -2703,16 +2752,17 @@ mod tests {
     /// Assert that `path` is masked due to a bwrap arg sequence like:
     ///
     /// `bwrap ... --perms 000 --ro-bind-data FD PATH`
-    fn assert_file_masked(args: &[String], path: &Path) {
-        let path = path_to_string(path);
+    fn assert_file_masked(args: &[impl AsRef<std::ffi::OsStr>], path: &Path) {
+        let path = path.as_os_str();
         assert!(
             args.windows(5).any(|window| {
-                window[0] == "--perms"
-                    && window[1] == "000"
-                    && window[2] == "--ro-bind-data"
-                    && window[4] == path
+                window[0].as_ref() == "--perms"
+                    && window[1].as_ref() == "000"
+                    && window[2].as_ref() == "--ro-bind-data"
+                    && window[4].as_ref() == path
             }),
-            "expected file mask for {path}: {args:#?}"
+            "expected file mask for {}",
+            path.display()
         );
     }
 
@@ -2750,14 +2800,14 @@ mod tests {
         );
     }
 
-    fn synthetic_mount_target_paths(args: &BwrapArgs) -> Vec<PathBuf> {
+    fn synthetic_mount_target_paths(args: &BwrapFilesystemArgs) -> Vec<PathBuf> {
         args.synthetic_mount_targets
             .iter()
             .map(|target| target.path().to_path_buf())
             .collect()
     }
 
-    fn protected_create_target_paths(args: &BwrapArgs) -> Vec<PathBuf> {
+    fn protected_create_target_paths(args: &BwrapFilesystemArgs) -> Vec<PathBuf> {
         args.protected_create_targets
             .iter()
             .map(|target| target.path().to_path_buf())
