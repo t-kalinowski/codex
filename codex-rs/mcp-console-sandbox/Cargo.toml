@@ -49,6 +49,7 @@ codex-linux-sandbox = { workspace = true }
 codex-windows-sandbox = { path = "../windows-sandbox-rs", default-features = false }
 windows-sys = { version = "0.52", features = [
     "Win32_Foundation",
+    "Win32_NetworkManagement_WindowsFilteringPlatform",
     "Win32_Security",
     "Win32_System_Console",
     "Win32_System_Pipes",

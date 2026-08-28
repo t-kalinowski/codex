@@ -27,6 +27,7 @@ use windows_support::InputPipe;
 use windows_support::OutputPipe;
 use windows_support::Runner;
 use windows_support::RunnerExecutable;
+use windows_support::delete_one_standalone_wfp_filter;
 use windows_support::native_tests_enabled;
 use windows_support::open_process_for_wait;
 use windows_support::run_bootstrap;
@@ -119,6 +120,56 @@ fn discovery_reports_windows_contract_and_missing_companions_fail_closed() {
     assert_eq!(launch["type"], "error");
     assert_eq!(launch["error"]["code"], "companion_missing");
     assert_eq!(launch["error"]["target_started"], false);
+}
+
+#[test]
+fn platform_minimal_is_reported_unsupported_and_rejected_before_target_start() {
+    let executable = RunnerExecutable::with_companions();
+    let root = TempDir::new().expect("policy root");
+    let state = root.path().join("state");
+    let workspace = root.path().join("workspace");
+    std::fs::create_dir(&state).expect("state directory");
+    std::fs::create_dir(&workspace).expect("workspace directory");
+    let marker = workspace.join("target-started");
+    let fixture = cargo_bin("mcp-console-sandbox-fixture").expect("fixture binary");
+    let target = vec![
+        fixture.into_os_string(),
+        OsString::from("write"),
+        marker.as_os_str().to_owned(),
+        OsString::from("started"),
+    ];
+    let mut runner = Runner::spawn(&executable, &state, &target);
+
+    let discovery = runner.request(json!({
+        "type": "discover",
+        "id": 1,
+        "protocol_version": PROTOCOL_VERSION,
+    }));
+    assert_eq!(
+        discovery["capabilities"]["filesystem"]["platform_minimal"],
+        false
+    );
+    assert_eq!(
+        discovery["capabilities"]["filesystem"]["host_read_only"],
+        true
+    );
+
+    let mut setup = setup_operation(2, "prepare", &workspace);
+    setup["setup"]["filesystem"]["base"] = json!("platform_minimal");
+    let setup_response = runner.request(setup);
+    assert_eq!(setup_response["type"], "error");
+    assert_eq!(setup_response["error"]["code"], "unsupported_policy");
+    assert_eq!(setup_response["error"]["phase"], "validation");
+    assert_eq!(setup_response["error"]["target_started"], false);
+
+    let mut launch = launch_request(3, &workspace, null_streams());
+    launch["launch"]["filesystem"]["base"] = json!("platform_minimal");
+    let launch_response = runner.request(launch);
+    assert_eq!(launch_response["type"], "error");
+    assert_eq!(launch_response["error"]["code"], "unsupported_policy");
+    assert_eq!(launch_response["error"]["phase"], "validation");
+    assert_eq!(launch_response["error"]["target_started"], false);
+    assert!(!marker.exists());
 }
 
 #[test]
@@ -925,6 +976,124 @@ fn native_setup_launch_streams_and_retirement() {
         &fixture,
     );
     exercise_lifecycle_contracts(&executable, &state, &workspace, &fixture);
+}
+
+#[test]
+fn setup_detects_credentials_rotated_by_another_state_directory() {
+    if !native_tests_enabled() {
+        return;
+    }
+
+    let executable = RunnerExecutable::with_companions();
+    let root = TempDir::new().expect("policy root");
+    let workspace = root.path().join("workspace");
+    let state_a = root.path().join("state-a");
+    let state_b = root.path().join("state-b");
+    std::fs::create_dir(&workspace).expect("workspace directory");
+    std::fs::create_dir(&state_a).expect("first state directory");
+    std::fs::create_dir(&state_b).expect("second state directory");
+    let fixture = workspace.join("sandbox-fixture.exe");
+    std::fs::copy(
+        cargo_bin("mcp-console-sandbox-fixture").expect("fixture binary"),
+        &fixture,
+    )
+    .expect("stage target fixture");
+    let target = vec![
+        fixture.into_os_string(),
+        OsString::from("exit"),
+        OsString::from("0"),
+    ];
+
+    let mut runner_a = Runner::spawn(&executable, &state_a, &target);
+    let prepared_a = runner_a.request(setup_operation(1, "prepare", &workspace));
+    assert_eq!(prepared_a["type"], "setup_completed", "{prepared_a}");
+
+    let mut runner_b = Runner::spawn(&executable, &state_b, &target);
+    let prepared_b = runner_b.request(setup_operation(1, "prepare", &workspace));
+    assert_eq!(prepared_b["type"], "setup_completed", "{prepared_b}");
+    drop(runner_b);
+
+    let status = runner_a.request(json!({
+        "type": "setup_status",
+        "id": 2,
+        "protocol_version": PROTOCOL_VERSION,
+        "setup": setup_request(&workspace),
+    }));
+    assert_eq!(status["type"], "setup_status", "{status}");
+    assert_eq!(
+        status["setup"]["state"],
+        "administrative_action_required",
+        "{status}"
+    );
+    assert!(
+        status["setup"]["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("stale")),
+        "{status}"
+    );
+
+    let repaired = runner_a.request(setup_operation(3, "prepare", &workspace));
+    assert_eq!(repaired["type"], "setup_completed", "{repaired}");
+    assert_eq!(repaired["operation"], "prepared");
+    assert_eq!(
+        runner_a.request(launch_request(4, &workspace, null_streams()))["type"],
+        "launch_accepted"
+    );
+    assert_successful_outcome(&runner_a.request(wait_request(5)), 0);
+}
+
+#[test]
+fn missing_standalone_wfp_filter_prevents_launch() {
+    if !native_tests_enabled() {
+        return;
+    }
+
+    let executable = RunnerExecutable::with_companions();
+    let root = TempDir::new().expect("policy root");
+    let workspace = root.path().join("workspace");
+    let state = root.path().join("state");
+    std::fs::create_dir(&workspace).expect("workspace directory");
+    std::fs::create_dir(&state).expect("state directory");
+    let marker = workspace.join("target-started");
+    let fixture = cargo_bin("mcp-console-sandbox-fixture").expect("fixture binary");
+    let target = vec![
+        fixture.as_os_str().to_owned(),
+        OsString::from("write"),
+        marker.as_os_str().to_owned(),
+        OsString::from("started"),
+    ];
+    let mut runner = Runner::spawn(&executable, &state, &target);
+    let prepared = runner.request(setup_operation(1, "prepare", &workspace));
+    assert_eq!(prepared["type"], "setup_completed", "{prepared}");
+    delete_one_standalone_wfp_filter();
+
+    let status = runner.request(json!({
+        "type": "setup_status",
+        "id": 2,
+        "protocol_version": PROTOCOL_VERSION,
+        "setup": setup_request(&workspace),
+    }));
+    assert_eq!(status["type"], "setup_status", "{status}");
+    assert_eq!(
+        status["setup"]["state"],
+        "administrative_action_required",
+        "{status}"
+    );
+
+    let launch = runner.request(launch_request(3, &workspace, null_streams()));
+    if launch["type"] == "launch_accepted" {
+        let _ = runner.request(wait_request(4));
+    }
+    let namespace = codex_windows_sandbox::WindowsSandboxPolicyNamespace::McpConsole;
+    let restored = codex_windows_sandbox::install_wfp_filters_for_account_in_namespace(
+        namespace.offline_username(),
+        namespace,
+    );
+    assert!(restored.is_ok(), "restore standalone WFP filters: {restored:?}");
+    assert_eq!(launch["type"], "error", "{launch}");
+    assert_eq!(launch["error"]["code"], "launch_failed", "{launch}");
+    assert_eq!(launch["error"]["target_started"], false, "{launch}");
+    assert!(!marker.exists());
 }
 
 fn exercise_global_policy_lease(

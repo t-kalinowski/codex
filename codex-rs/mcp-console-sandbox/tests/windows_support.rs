@@ -35,6 +35,9 @@ use windows_sys::Win32::Foundation::WAIT_FAILED;
 use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
 use windows_sys::Win32::Foundation::WAIT_TIMEOUT;
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::FwpmEngineClose0;
+use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::FwpmEngineOpen0;
+use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::FwpmFilterDeleteByKey0;
 use windows_sys::Win32::System::Pipes::ConnectNamedPipe;
 use windows_sys::Win32::System::Pipes::CreateNamedPipeW;
 use windows_sys::Win32::System::Pipes::CreatePipe;
@@ -50,6 +53,8 @@ use windows_sys::Win32::System::Threading::STARTF_USESTDHANDLES;
 use windows_sys::Win32::System::Threading::STARTUPINFOW;
 use windows_sys::Win32::System::Threading::TerminateProcess;
 use windows_sys::Win32::System::Threading::WaitForSingleObject;
+use windows_sys::Win32::System::Rpc::RPC_C_AUTHN_DEFAULT;
+use windows_sys::core::GUID;
 
 const PIPE_ACCESS_DUPLEX: u32 = 0x0000_0003;
 const FILE_FLAG_FIRST_PIPE_INSTANCE: u32 = 0x0008_0000;
@@ -493,6 +498,26 @@ pub fn wait_for_process_exit(process: &OwnedHandle, timeout: Duration) -> std::i
             "unexpected process wait result: {result}"
         ))),
     }
+}
+
+pub fn delete_one_standalone_wfp_filter() {
+    const FILTER_KEY: GUID = GUID::from_u128(0x51b90ce5_2e26_47be_bd22_975898b4e09c);
+
+    let mut engine = 0;
+    let opened = unsafe {
+        FwpmEngineOpen0(
+            std::ptr::null(),
+            RPC_C_AUTHN_DEFAULT as u32,
+            std::ptr::null(),
+            std::ptr::null(),
+            &mut engine,
+        )
+    };
+    assert_eq!(opened, 0, "open WFP engine: {opened:#x}");
+    let deleted = unsafe { FwpmFilterDeleteByKey0(engine, &FILTER_KEY) };
+    let closed = unsafe { FwpmEngineClose0(engine) };
+    assert_eq!(deleted, 0, "delete standalone WFP filter: {deleted:#x}");
+    assert_eq!(closed, 0, "close WFP engine: {closed:#x}");
 }
 
 pub struct AliasedRunner {
