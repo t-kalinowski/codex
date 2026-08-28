@@ -1,3 +1,5 @@
+load("@crates//:defs.bzl", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_library")
 load("//:defs.bzl", "codex_rust_crate")
 
 # Cargo's build.rs emits rustc-link-arg-bin so only the setup helper gets the
@@ -31,6 +33,7 @@ genrule(
         "$(location @llvm//tools:llvm-rc) -no-preprocess \"$(@D)/codex-windows-sandbox-setup.manifest.rc\"",
     ]),
     tools = ["@llvm//tools:llvm-rc"],
+    visibility = ["//codex-rs/windows-sandbox-rs/no-telemetry:__pkg__"],
 )
 
 codex_rust_crate(
@@ -50,9 +53,53 @@ codex_rust_crate(
     # rustc-link-arg-bin directives, and the target-local equivalents above
     # provide the link inputs and flags without the unsupported-directive warning.
     build_script_enabled = False,
+    crate_features = ["telemetry"],
     crate_name = "codex_windows_sandbox",
     test_data_extra = [
         ":codex-command-runner",
         ":codex-windows-sandbox-setup",
     ],
+)
+
+# Private feature-free build edge for the standalone MCP Console runner. The
+# canonical target above keeps telemetry enabled for existing Codex callers.
+rust_library(
+    name = "windows-sandbox-rs-no-telemetry",
+    srcs = glob(
+        ["src/**/*.rs"],
+        exclude = [
+            "src/bin/command_runner/main.rs",
+            "src/bin/setup_main/main.rs",
+        ],
+    ),
+    crate_name = "codex_windows_sandbox",
+    edition = "2024",
+    rustc_env = {"CARGO_PKG_VERSION": "{STABLE_CODEX_WORKSPACE_VERSION}"},
+    stamp = 1,
+    visibility = [
+        "//codex-rs/mcp-console-sandbox:__pkg__",
+        "//codex-rs/sandboxing:__pkg__",
+        "//codex-rs/windows-sandbox-rs/no-telemetry:__pkg__",
+    ],
+    deps = all_crate_deps(cargo_only = True) + [
+        "//codex-rs/protocol",
+        "//codex-rs/utils/absolute-path",
+        "//codex-rs/utils/pty",
+        "//codex-rs/utils/string",
+    ],
+)
+
+filegroup(
+    name = "no-telemetry-helper-srcs",
+    srcs = glob(["src/**/*.rs"]),
+    visibility = ["//codex-rs/windows-sandbox-rs/no-telemetry:__pkg__"],
+)
+
+exports_files(
+    [
+        "codex-windows-sandbox-setup.manifest",
+        "src/bin/command_runner/main.rs",
+        "src/bin/setup_main/main.rs",
+    ],
+    visibility = ["//codex-rs/windows-sandbox-rs/no-telemetry:__pkg__"],
 )

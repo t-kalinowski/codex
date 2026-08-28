@@ -1,0 +1,217 @@
+name: MCP Console sandbox runner
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "mcp-console/sandbox-runner/**"
+
+permissions:
+  contents: read
+
+jobs:
+  native-contract:
+    name: Native contract (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            runner: windows-2022
+    defaults:
+      run:
+        working-directory: codex-rs
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-ci
+        if: runner.os != 'Windows'
+
+      - name: Configure Windows build paths
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $BuildRoot = Join-Path $env:RUNNER_TEMP "mcp-console-sandbox"
+          $CargoTarget = Join-Path $BuildRoot "cargo-target"
+          $Temp = Join-Path $BuildRoot "tmp"
+          New-Item -ItemType Directory -Force -Path $CargoTarget, $Temp | Out-Null
+          @(
+            "CODEX_REPO_ROOT=$env:GITHUB_WORKSPACE"
+            "CARGO_TARGET_DIR=$CargoTarget"
+            "CARGO_NET_GIT_FETCH_WITH_CLI=true"
+            "TEMP=$Temp"
+            "TMP=$Temp"
+          ) | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          git config --global core.longpaths true
+
+      - name: Install Linux sandbox build dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends build-essential pkg-config libcap-dev bubblewrap
+
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          components: clippy,rustfmt
+
+      - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
+        if: runner.os == 'Windows'
+        with:
+          tool: just@1.51.0
+
+      - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
+        with:
+          tool: nextest@0.9.103
+
+      - name: Build private companion resources
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${RUNNER_OS}" == "Linux" ]]; then
+            cargo build --locked -p codex-bwrap --bin bwrap
+          elif [[ "${RUNNER_OS}" == "Windows" ]]; then
+            cargo build \
+              --locked \
+              -p codex-windows-sandbox \
+              --no-default-features \
+              --bin codex-windows-sandbox-setup \
+              --bin codex-command-runner
+          fi
+
+      - name: Run executable contract tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${RUNNER_OS}" == "Linux" ]]; then
+            env \
+              "CARGO_BIN_EXE_bwrap=${CARGO_TARGET_DIR}/debug/bwrap" \
+              just test -p codex-mcp-console-sandbox
+          elif [[ "${RUNNER_OS}" == "Windows" ]]; then
+            setup_helper="$(cygpath -w "${CARGO_TARGET_DIR}/debug/codex-windows-sandbox-setup.exe")"
+            command_runner="$(cygpath -w "${CARGO_TARGET_DIR}/debug/codex-command-runner.exe")"
+            env \
+              "CARGO_BIN_EXE_codex_windows_sandbox_setup=${setup_helper}" \
+              "CARGO_BIN_EXE_codex_command_runner=${command_runner}" \
+              "MCP_CONSOLE_SANDBOX_NATIVE_WINDOWS_TESTS=1" \
+              just test -p codex-mcp-console-sandbox --test-threads 1
+          else
+            just test -p codex-mcp-console-sandbox
+          fi
+
+      - name: Lint focused runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${RUNNER_OS}" == "Linux" ]]; then
+            just argument-comment-lint -p codex-mcp-console-sandbox
+          fi
+          cargo clippy \
+            -p codex-mcp-console-sandbox \
+            --all-targets \
+            --all-features \
+            -- \
+            -D warnings
+
+      - name: Run modified native sandbox crate tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${RUNNER_OS}" == "Linux" ]]; then
+            just test -p codex-sandboxing
+            env \
+              "CARGO_BIN_EXE_bwrap=${CARGO_TARGET_DIR}/debug/bwrap" \
+              just test -p codex-linux-sandbox
+          elif [[ "${RUNNER_OS}" == "Windows" ]]; then
+            setup_helper="$(cygpath -w "${CARGO_TARGET_DIR}/debug/codex-windows-sandbox-setup.exe")"
+            just test -p codex-utils-pty --test-threads 1
+            env \
+              "CARGO_BIN_EXE_codex_windows_sandbox_setup=${setup_helper}" \
+              just test -p codex-sandboxing --test-threads 1
+            env \
+              "CARGO_BIN_EXE_codex_windows_sandbox_setup=${setup_helper}" \
+              "MCP_CONSOLE_SANDBOX_NATIVE_WINDOWS_TESTS=1" \
+              just test -p codex-windows-sandbox --test-threads 1
+          else
+            just test \
+              -p codex-sandboxing \
+              --status-level fail \
+              --final-status-level fail \
+              -- \
+              --skip create_seatbelt_args_with_read_only_git_and_codex_subpaths \
+              --skip create_seatbelt_args_with_read_only_git_pointer_file
+          fi
+
+      - name: Validate configured Bazel build
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bazel test \
+            --config=mcp-console-sandbox \
+            //codex-rs/mcp-console-sandbox:mcp-console-sandbox-lib-contract-test
+
+      - name: Build focused release tuple
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build \
+            --locked \
+            -p codex-mcp-console-sandbox \
+            --bin mcp-console-sandbox \
+            --release
+          if [[ "${RUNNER_OS}" == "Linux" ]]; then
+            cargo build --locked -p codex-bwrap --bin bwrap --release
+          elif [[ "${RUNNER_OS}" == "Windows" ]]; then
+            cargo build \
+              --locked \
+              -p codex-windows-sandbox \
+              --no-default-features \
+              --bin codex-windows-sandbox-setup \
+              --bin codex-command-runner \
+              --release
+          fi
+
+      - name: Smoke focused release tuple
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${RUNNER_OS}" == "Linux" ]]; then
+            env \
+              "CARGO_BIN_EXE_mcp-console-sandbox=${CARGO_TARGET_DIR}/release/mcp-console-sandbox" \
+              "CARGO_BIN_EXE_bwrap=${CARGO_TARGET_DIR}/release/bwrap" \
+              just test \
+                -p codex-mcp-console-sandbox \
+                --test runtime_contract \
+                host_read_only_denies_host_writes_without_creating_the_file
+          elif [[ "${RUNNER_OS}" == "Windows" ]]; then
+            runner="$(cygpath -w "${CARGO_TARGET_DIR}/release/mcp-console-sandbox.exe")"
+            setup_helper="$(cygpath -w "${CARGO_TARGET_DIR}/release/codex-windows-sandbox-setup.exe")"
+            command_runner="$(cygpath -w "${CARGO_TARGET_DIR}/release/codex-command-runner.exe")"
+            env \
+              "CARGO_BIN_EXE_mcp-console-sandbox=${runner}" \
+              "CARGO_BIN_EXE_codex_windows_sandbox_setup=${setup_helper}" \
+              "CARGO_BIN_EXE_codex_command_runner=${command_runner}" \
+              "MCP_CONSOLE_SANDBOX_NATIVE_WINDOWS_TESTS=1" \
+              just test \
+                -p codex-mcp-console-sandbox \
+                --test windows_contract \
+                native_setup_launch_streams_and_retirement \
+                --test-threads 1
+          else
+            env \
+              "CARGO_BIN_EXE_mcp-console-sandbox=${CARGO_TARGET_DIR}/release/mcp-console-sandbox" \
+              just test \
+                -p codex-mcp-console-sandbox \
+                --test runtime_contract \
+                host_read_only_denies_host_writes_without_creating_the_file
+          fi
+
+      - name: Check for a clean worktree
+        if: always() && !cancelled()
+        uses: ./.github/actions/check-clean-worktree
