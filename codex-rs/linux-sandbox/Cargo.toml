@@ -22,7 +22,7 @@ codex-install-context = { workspace = true }
 codex-network-proxy = { workspace = true }
 codex-process-hardening = { workspace = true }
 codex-protocol = { workspace = true }
-codex-sandboxing = { workspace = true }
+codex-sandboxing = { path = "../sandboxing", default-features = false }
 codex-utils-absolute-path = { workspace = true }
 globset = { workspace = true }
 landlock = { workspace = true }
@@ -35,6 +35,7 @@ url = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 codex-core = { workspace = true }
+ctor = { workspace = true }
 pretty_assertions = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = [
