@@ -15,6 +15,10 @@ use codex_utils_absolute_path::AbsolutePathBuf;
 #[cfg(test)]
 use pretty_assertions::assert_eq;
 #[cfg(test)]
+use std::ffi::OsString;
+#[cfg(test)]
+use std::os::unix::ffi::OsStringExt;
+#[cfg(test)]
 use std::os::unix::fs::PermissionsExt;
 
 fn read_only_permission_profile() -> PermissionProfile {
@@ -23,6 +27,54 @@ fn read_only_permission_profile() -> PermissionProfile {
 
 fn read_only_file_system_policy() -> FileSystemSandboxPolicy {
     read_only_permission_profile().file_system_sandbox_policy()
+}
+
+#[test]
+fn helper_parser_preserves_native_target_arguments() {
+    let native_argument = OsString::from_vec(vec![b'a', b'r', b'g', 0x80]);
+    let command = LandlockCommand::try_parse_from(vec![
+        OsString::from("codex-linux-sandbox"),
+        OsString::from("--sandbox-policy-cwd"),
+        OsString::from("/"),
+        OsString::from("--"),
+        OsString::from("/bin/echo"),
+        native_argument.clone(),
+    ])
+    .expect("parse helper arguments");
+
+    assert_eq!(
+        command.command,
+        vec![OsString::from("/bin/echo"), native_argument]
+    );
+}
+
+#[test]
+fn helper_parser_requires_complete_embedding_inputs() {
+    let result = LandlockCommand::try_parse_from([
+        "codex-linux-sandbox",
+        "--embedding-bwrap",
+        "/private/libexec/codex-resources/bwrap",
+        "--sandbox-policy-cwd",
+        "/",
+        "--",
+        "/bin/true",
+    ]);
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn helper_parser_accepts_embedding_command_as_pid_1() {
+    let command = LandlockCommand::try_parse_from([
+        "codex-linux-sandbox",
+        "--embedding-command-as-pid-1",
+        "--sandbox-policy-cwd",
+        "/",
+        "--",
+        "/bin/true",
+    ]);
+
+    assert!(command.is_ok(), "{command:?}");
 }
 
 #[test]
@@ -53,7 +105,7 @@ fn ignores_non_proc_mount_errors() {
 fn inserts_bwrap_argv0_before_command_separator() {
     let file_system_sandbox_policy = read_only_file_system_policy();
     let mut argv = build_bwrap_argv(
-        vec!["/bin/true".to_string()],
+        vec![OsString::from("/bin/true")],
         &file_system_sandbox_policy,
         Path::new("/"),
         Path::new("/"),
@@ -93,6 +145,9 @@ fn inserts_bwrap_argv0_before_command_separator() {
             "--".to_string(),
             "/bin/true".to_string(),
         ]
+        .into_iter()
+        .map(OsString::from)
+        .collect::<Vec<_>>()
     );
 }
 
@@ -100,7 +155,7 @@ fn inserts_bwrap_argv0_before_command_separator() {
 fn rewrites_inner_command_path_when_bwrap_lacks_argv0() {
     let file_system_sandbox_policy = read_only_file_system_policy();
     let mut argv = build_bwrap_argv(
-        vec!["/bin/true".to_string()],
+        vec![OsString::from("/bin/true")],
         &file_system_sandbox_policy,
         Path::new("/"),
         Path::new("/"),
@@ -141,7 +196,10 @@ fn rewrites_bwrap_helper_command_not_nested_user_command_when_current_exe_appear
         nested_current_exe.clone(),
         "--codex-run-as-apply-patch".to_string(),
         "patch".to_string(),
-    ];
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect();
 
     apply_inner_command_argv0_for_launcher(
         &mut argv,
@@ -162,6 +220,9 @@ fn rewrites_bwrap_helper_command_not_nested_user_command_when_current_exe_appear
             "--codex-run-as-apply-patch".to_string(),
             "patch".to_string(),
         ]
+        .into_iter()
+        .map(OsString::from)
+        .collect::<Vec<_>>()
     );
 }
 
@@ -169,7 +230,7 @@ fn rewrites_bwrap_helper_command_not_nested_user_command_when_current_exe_appear
 fn inserts_unshare_net_when_network_isolation_requested() {
     let file_system_sandbox_policy = read_only_file_system_policy();
     let argv = build_bwrap_argv(
-        vec!["/bin/true".to_string()],
+        vec![OsString::from("/bin/true")],
         &file_system_sandbox_policy,
         Path::new("/"),
         Path::new("/"),
@@ -181,14 +242,14 @@ fn inserts_unshare_net_when_network_isolation_requested() {
     )
     .expect("build bwrap argv")
     .args;
-    assert!(argv.contains(&"--unshare-net".to_string()));
+    assert!(argv.iter().any(|arg| arg == "--unshare-net"));
 }
 
 #[test]
 fn inserts_unshare_net_when_proxy_only_network_mode_requested() {
     let file_system_sandbox_policy = read_only_file_system_policy();
     let argv = build_bwrap_argv(
-        vec!["/bin/true".to_string()],
+        vec![OsString::from("/bin/true")],
         &file_system_sandbox_policy,
         Path::new("/"),
         Path::new("/"),
@@ -200,7 +261,7 @@ fn inserts_unshare_net_when_proxy_only_network_mode_requested() {
     )
     .expect("build bwrap argv")
     .args;
-    assert!(argv.contains(&"--unshare-net".to_string()));
+    assert!(argv.iter().any(|arg| arg == "--unshare-net"));
 }
 
 #[test]
@@ -517,7 +578,7 @@ fn managed_proxy_inner_command_includes_route_spec() {
         permission_profile: &permission_profile,
         allow_network_for_proxy: true,
         proxy_route_spec: Some("{\"routes\":[]}".to_string()),
-        command: vec!["/bin/true".to_string()],
+        command: vec![OsString::from("/bin/true")],
     });
 
     assert!(args.iter().any(|arg| arg == "--proxy-route-spec"));
@@ -533,7 +594,7 @@ fn inner_command_includes_permission_profile_flag() {
         permission_profile: &permission_profile,
         allow_network_for_proxy: false,
         proxy_route_spec: None,
-        command: vec!["/bin/true".to_string()],
+        command: vec![OsString::from("/bin/true")],
     });
 
     assert!(args.iter().any(|arg| arg == "--permission-profile"));
@@ -552,7 +613,7 @@ fn non_managed_inner_command_omits_route_spec() {
         permission_profile: &permission_profile,
         allow_network_for_proxy: false,
         proxy_route_spec: None,
-        command: vec!["/bin/true".to_string()],
+        command: vec![OsString::from("/bin/true")],
     });
 
     assert!(!args.iter().any(|arg| arg == "--proxy-route-spec"));
@@ -568,7 +629,7 @@ fn managed_proxy_inner_command_requires_route_spec() {
             permission_profile: &permission_profile,
             allow_network_for_proxy: true,
             proxy_route_spec: None,
-            command: vec!["/bin/true".to_string()],
+            command: vec![OsString::from("/bin/true")],
         })
     });
     assert!(result.is_err());
