@@ -210,14 +210,16 @@ lease; a stale per-state marker alone never reports ready. A managed-network
 `setup_status` may allocate retained proxy listeners so that inspection and
 launch use the same ports; the caller should perform setup and launch in the
 same runner process. The fixed Windows sandbox identities and firewall rules
-permit one active policy generation machine-wide. Setup mutations take the
-non-inheritable global lease briefly. Launch acquires its lifetime lease,
-verifies the exact outbound, loopback, and stale-rule state, refreshes ACLs,
-then holds the lease through tree retirement and proxy cleanup. A concurrent
-runner or ordinary Codex setup fails before mutation or target start. The lease
-is released before the runner publishes the final outcome. Verification
-failures include a bounded, redacted diagnostic identifying the mismatched
-firewall rule or property without exposing the setup payload or environment.
+use a dedicated MCP Console namespace and permit one active standalone policy
+generation machine-wide. Standalone setup mutations take the non-inheritable
+global lease briefly. Launch acquires its lifetime lease, verifies the exact
+outbound, loopback, and stale-rule state, refreshes ACLs, then holds the lease
+through tree retirement and proxy cleanup. A concurrent standalone runner
+fails before mutation or target start. Ordinary Codex retains its distinct
+identifiers and behavior. The lease is released before the runner publishes
+the final outcome. Verification failures include a bounded, redacted
+diagnostic identifying the mismatched firewall rule or property without
+exposing the setup payload or environment.
 
 One runner owns at most one target generation. A failure reported with
 `target_started=true` consumes that generation even when no

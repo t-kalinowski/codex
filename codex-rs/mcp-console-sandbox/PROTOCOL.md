@@ -635,10 +635,10 @@ removes inherited aliases case-insensitively, and rejects conflicting managed
 values instead of emitting duplicate aliases.
 
 Windows setup temporarily uses `CODEX_WINDOWS_SANDBOX_PROXY_PORTS` to project
-the selected loopback listener ports into WFP policy, then removes it from the
-target environment. Version 1 disables managed CA, attribution, credential
-brokerage, and secret or header injection, so it injects no variables for
-those features.
+the selected loopback listener ports into the offline Windows Firewall policy,
+then removes it from the target environment. Version 1 disables managed CA,
+attribution, credential brokerage, and secret or header injection, so it
+injects no variables for those features.
 
 On macOS with managed SOCKS enabled, the runner preserves a caller-provided
 `GIT_SSH_COMMAND` as its native value, including a non-Unicode value. If the
