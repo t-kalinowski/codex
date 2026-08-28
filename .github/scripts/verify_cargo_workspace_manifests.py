@@ -27,9 +27,45 @@ UTILITY_NAME_EXCEPTIONS = {
 }
 MANIFEST_FEATURE_EXCEPTIONS = {
     "codex-rs/v8-poc/Cargo.toml": {"sandbox": ("v8/v8_enable_sandbox",)},
+    # Temporary rolling-patch boundary: ordinary Codex builds keep Windows
+    # sandbox telemetry, while the private runner selects the matching explicit
+    # telemetry-free Bazel variants. Remove these entries when that low-level
+    # boundary no longer requires Cargo feature selection.
+    "codex-rs/sandboxing/Cargo.toml": {
+        "default": ("windows-sandbox-telemetry",),
+        "windows-sandbox-telemetry": ("codex-windows-sandbox/telemetry",),
+    },
+    "codex-rs/windows-sandbox-rs/Cargo.toml": {
+        "default": ("telemetry",),
+        "telemetry": ("dep:codex-otel",),
+    },
 }
-OPTIONAL_DEPENDENCY_EXCEPTIONS = set()
+OPTIONAL_DEPENDENCY_EXCEPTIONS = {
+    ("codex-rs/windows-sandbox-rs/Cargo.toml", "dependencies", "codex-otel"),
+}
 INTERNAL_DEPENDENCY_FEATURE_EXCEPTIONS = {}
+INTERNAL_DEFAULT_FEATURE_EXCEPTIONS = {
+    (
+        "codex-rs/linux-sandbox/Cargo.toml",
+        'target.cfg(target_os = "linux").dependencies',
+        "codex-sandboxing",
+    ),
+    (
+        "codex-rs/mcp-console-sandbox/Cargo.toml",
+        "dependencies",
+        "codex-sandboxing",
+    ),
+    (
+        "codex-rs/mcp-console-sandbox/Cargo.toml",
+        'target.cfg(target_os = "windows").dependencies',
+        "codex-windows-sandbox",
+    ),
+    (
+        "codex-rs/sandboxing/Cargo.toml",
+        "dependencies",
+        "codex-windows-sandbox",
+    ),
+}
 
 
 def main() -> int:
@@ -37,6 +73,7 @@ def main() -> int:
     used_manifest_feature_exceptions: set[str] = set()
     used_optional_dependency_exceptions: set[tuple[str, str, str]] = set()
     used_internal_dependency_feature_exceptions: set[tuple[str, str, str]] = set()
+    used_internal_default_feature_exceptions: set[tuple[str, str, str]] = set()
     failures_by_path: dict[str, list[str]] = {}
 
     for path in manifests_to_verify():
@@ -46,6 +83,7 @@ def main() -> int:
             used_manifest_feature_exceptions,
             used_optional_dependency_exceptions,
             used_internal_dependency_feature_exceptions,
+            used_internal_default_feature_exceptions,
         ):
             failures_by_path[manifest_key(path)] = errors
 
@@ -54,6 +92,7 @@ def main() -> int:
         used_manifest_feature_exceptions,
         used_optional_dependency_exceptions,
         used_internal_dependency_feature_exceptions,
+        used_internal_default_feature_exceptions,
     )
 
     if not failures_by_path:
@@ -107,6 +146,7 @@ def manifest_errors(
     used_manifest_feature_exceptions: set[str],
     used_optional_dependency_exceptions: set[tuple[str, str, str]],
     used_internal_dependency_feature_exceptions: set[tuple[str, str, str]],
+    used_internal_default_feature_exceptions: set[tuple[str, str, str]],
 ) -> list[str]:
     manifest = load_manifest(path)
     package = manifest.get("package")
@@ -196,11 +236,15 @@ def manifest_errors(
                         )
 
             if dependency.get("default-features") is False:
-                errors.append(
-                    "remove `default-features = false` from workspace dependency "
-                    f"`{dependency_entry_label(section_name, dependency_name)}`; "
-                    "new workspace crate feature toggles are not allowed"
-                )
+                exception_key = (path_key, section_name, dependency_name)
+                if exception_key in INTERNAL_DEFAULT_FEATURE_EXCEPTIONS:
+                    used_internal_default_feature_exceptions.add(exception_key)
+                else:
+                    errors.append(
+                        "remove `default-features = false` from workspace dependency "
+                        f"`{dependency_entry_label(section_name, dependency_name)}`; "
+                        "new workspace crate feature toggles are not allowed"
+                    )
 
     return errors
 
@@ -318,6 +362,7 @@ def add_unused_exception_errors(
     used_manifest_feature_exceptions: set[str],
     used_optional_dependency_exceptions: set[tuple[str, str, str]],
     used_internal_dependency_feature_exceptions: set[tuple[str, str, str]],
+    used_internal_default_feature_exceptions: set[tuple[str, str, str]],
 ) -> None:
     for path_key in sorted(
         set(MANIFEST_FEATURE_EXCEPTIONS) - used_manifest_feature_exceptions
@@ -350,6 +395,18 @@ def add_unused_exception_errors(
             "remove the stale internal dependency feature exception for "
             f"`{dependency_entry_label(section_name, dependency_name)}` from "
             "`INTERNAL_DEPENDENCY_FEATURE_EXCEPTIONS`",
+        )
+
+    for path_key, section_name, dependency_name in sorted(
+        INTERNAL_DEFAULT_FEATURE_EXCEPTIONS
+        - used_internal_default_feature_exceptions
+    ):
+        add_failure(
+            failures_by_path,
+            path_key,
+            "remove the stale default-feature exception for "
+            f"`{dependency_entry_label(section_name, dependency_name)}` from "
+            "`INTERNAL_DEFAULT_FEATURE_EXCEPTIONS`",
         )
 
 

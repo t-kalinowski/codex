@@ -1,5 +1,6 @@
 use clap::Parser;
 use std::ffi::CString;
+use std::ffi::OsString;
 use std::fmt;
 use std::fs;
 use std::fs::File;
@@ -23,6 +24,7 @@ use std::time::Duration;
 use crate::bwrap::BwrapNetworkMode;
 use crate::bwrap::BwrapOptions;
 use crate::bwrap::create_bwrap_command_args;
+use crate::embedding::EmbeddingOptions;
 use crate::landlock::apply_permission_profile_to_current_thread;
 use crate::launcher::exec_bwrap;
 use crate::launcher::preferred_bwrap_supports_argv0;
@@ -144,9 +146,12 @@ pub struct LandlockCommand {
     #[arg(long = "no-proc", default_value_t = false)]
     pub no_proc: bool,
 
+    #[command(flatten)]
+    pub(crate) embedding: EmbeddingOptions,
+
     /// Full command args to run under the Linux sandbox helper.
     #[arg(trailing_var_arg = true)]
-    pub command: Vec<String>,
+    pub command: Vec<OsString>,
 }
 
 /// Entry point for the Linux sandbox helper.
@@ -167,8 +172,11 @@ pub fn run_main() -> ! {
         proxy_route_spec,
         verify_fd_mounts,
         no_proc,
+        embedding,
         command,
     } = LandlockCommand::parse();
+
+    embedding.activate();
 
     if command.is_empty() {
         panic!("No command specified to execute.");
@@ -237,6 +245,10 @@ pub fn run_main() -> ! {
             proxy_routing_active,
         ) {
             panic!("error applying Linux sandbox restrictions: {e:?}");
+        }
+
+        if crate::embedding::command_as_pid_1() {
+            exec_or_panic(command);
         }
 
         let signal_mask = ForwardedSignalMask::block();
@@ -399,7 +411,7 @@ fn run_bwrap_with_proc_fallback(
     command_cwd: Option<&Path>,
     file_system_sandbox_policy: &FileSystemSandboxPolicy,
     network_sandbox_policy: NetworkSandboxPolicy,
-    inner: Vec<String>,
+    inner: Vec<OsString>,
     mount_proc: bool,
     allow_network_for_proxy: bool,
 ) -> ! {
@@ -447,7 +459,7 @@ fn bwrap_network_mode(
 }
 
 fn build_bwrap_argv(
-    inner: Vec<String>,
+    inner: Vec<OsString>,
     file_system_sandbox_policy: &FileSystemSandboxPolicy,
     sandbox_policy_cwd: &Path,
     command_cwd: &Path,
@@ -461,7 +473,7 @@ fn build_bwrap_argv(
         options,
     )?;
 
-    let mut argv = vec!["bwrap".to_string()];
+    let mut argv = vec![OsString::from("bwrap")];
     argv.extend(bwrap_args.args);
     Ok(crate::bwrap::BwrapArgs {
         args: argv,
@@ -476,7 +488,7 @@ fn exit_with_bwrap_build_error(err: codex_protocol::error::CodexErr) -> ! {
     std::process::exit(1);
 }
 
-fn apply_inner_command_argv0(argv: &mut Vec<String>) {
+fn apply_inner_command_argv0(argv: &mut Vec<OsString>) {
     apply_inner_command_argv0_for_launcher(
         argv,
         preferred_bwrap_supports_argv0(),
@@ -485,10 +497,11 @@ fn apply_inner_command_argv0(argv: &mut Vec<String>) {
 }
 
 fn apply_inner_command_argv0_for_launcher(
-    argv: &mut Vec<String>,
+    argv: &mut Vec<OsString>,
     supports_argv0: bool,
-    argv0_fallback_command: String,
+    argv0_fallback_command: impl Into<OsString>,
 ) {
+    let argv0_fallback_command = argv0_fallback_command.into();
     let command_separator_index = argv
         .iter()
         .position(|arg| arg == "--")
@@ -497,7 +510,10 @@ fn apply_inner_command_argv0_for_launcher(
     if supports_argv0 {
         argv.splice(
             command_separator_index..command_separator_index,
-            ["--argv0".to_string(), CODEX_LINUX_SANDBOX_ARG0.to_string()],
+            [
+                OsString::from("--argv0"),
+                OsString::from(CODEX_LINUX_SANDBOX_ARG0),
+            ],
         );
         return;
     }
@@ -509,9 +525,9 @@ fn apply_inner_command_argv0_for_launcher(
     *command = argv0_fallback_command;
 }
 
-fn current_process_argv0() -> String {
+fn current_process_argv0() -> OsString {
     match std::env::args_os().next() {
-        Some(argv0) => argv0.to_string_lossy().into_owned(),
+        Some(argv0) => argv0,
         None => panic!("failed to resolve current process argv[0]"),
     }
 }
@@ -547,20 +563,24 @@ fn build_preflight_bwrap_argv(
     )
 }
 
-fn resolve_true_command() -> String {
+fn resolve_true_command() -> OsString {
     for candidate in ["/usr/bin/true", "/bin/true"] {
         if Path::new(candidate).exists() {
-            return candidate.to_string();
+            return OsString::from(candidate);
         }
     }
-    "true".to_string()
+    OsString::from("true")
 }
 
 fn run_or_exec_bwrap(bwrap_args: crate::bwrap::BwrapArgs) -> ! {
     if bwrap_args.synthetic_mount_targets.is_empty()
         && bwrap_args.protected_create_targets.is_empty()
     {
-        exec_bwrap(bwrap_args.args, bwrap_args.preserved_files);
+        exec_bwrap(
+            bwrap_args.args,
+            bwrap_args.preserved_files,
+            crate::embedding::bwrap_info_fd(),
+        );
     }
     run_bwrap_in_child_with_synthetic_mount_cleanup(bwrap_args);
 }
@@ -594,7 +614,14 @@ fn run_bwrap_in_child_with_synthetic_mount_cleanup(bwrap_args: crate::bwrap::Bwr
         }
         terminate_with_parent(parent_pid);
         wait_for_parent_exec_start(exec_start_pipe[0], exec_start_pipe[1]);
-        exec_bwrap(args, preserved_files);
+        exec_bwrap(args, preserved_files, crate::embedding::bwrap_info_fd());
+    }
+
+    if let Some(info_fd) = crate::embedding::bwrap_info_fd()
+        && unsafe { libc::close(info_fd) } == -1
+    {
+        let err = std::io::Error::last_os_error();
+        panic!("failed to close bubblewrap information descriptor in monitor: {err}");
     }
 
     close_child_exec_start_read(exec_start_pipe[0]);
@@ -602,6 +629,26 @@ fn run_bwrap_in_child_with_synthetic_mount_cleanup(bwrap_args: crate::bwrap::Bwr
     let signal_forwarders = install_bwrap_signal_forwarders(pid);
     release_child_exec_start(exec_start_pipe[1]);
     setup_signal_mask.restore();
+    let standard_stream_release_error = if crate::embedding::command_as_pid_1() {
+        (|| -> std::io::Result<()> {
+            let null = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open("/dev/null")?;
+            for descriptor in [libc::STDIN_FILENO, libc::STDOUT_FILENO, libc::STDERR_FILENO] {
+                if unsafe { libc::dup2(null.as_raw_fd(), descriptor) } == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        })()
+        .err()
+    } else {
+        None
+    };
+    if standard_stream_release_error.is_some() {
+        send_signal_to_bwrap_child(pid, libc::SIGKILL);
+    }
     let status = wait_for_bwrap_child(pid);
     let cleanup_signal_mask = ForwardedSignalMask::block();
     BWRAP_CHILD_PID.store(0, Ordering::SeqCst);
@@ -613,6 +660,9 @@ fn run_bwrap_in_child_with_synthetic_mount_cleanup(bwrap_args: crate::bwrap::Bwr
         || cleanup_protected_create_targets(&protected_create_registrations);
     signal_forwarders.restore();
     cleanup_signal_mask.restore();
+    if let Some(err) = standard_stream_release_error {
+        panic!("failed to release embedding parent standard streams: {err}");
+    }
     exit_with_wait_status_or_policy_violation(status, protected_create_violation);
 }
 
@@ -1334,6 +1384,10 @@ fn synthetic_mount_marker_dir(path: &Path) -> PathBuf {
 }
 
 pub(crate) fn synthetic_mount_registry_root() -> PathBuf {
+    if let Some(registry_root) = crate::embedding::synthetic_mount_registry_root() {
+        return registry_root.to_path_buf();
+    }
+
     static REGISTRY_ROOT: OnceLock<PathBuf> = OnceLock::new();
 
     REGISTRY_ROOT
@@ -1450,7 +1504,7 @@ fn run_bwrap_in_child_capture_stderr(bwrap_args: crate::bwrap::BwrapArgs) -> Str
             close_fd_or_panic(write_fd, "close write end in bubblewrap child");
         }
 
-        exec_bwrap(args, preserved_files);
+        exec_bwrap(args, preserved_files, /*bwrap_info_fd*/ None);
     }
 
     let signal_forwarders = install_bwrap_signal_forwarders(pid);
@@ -1507,11 +1561,11 @@ struct InnerSeccompCommandArgs<'a> {
     permission_profile: &'a PermissionProfile,
     allow_network_for_proxy: bool,
     proxy_route_spec: Option<String>,
-    command: Vec<String>,
+    command: Vec<OsString>,
 }
 
 /// Build the inner command that applies seccomp after bubblewrap.
-fn build_inner_seccomp_command(args: InnerSeccompCommandArgs<'_>) -> Vec<String> {
+fn build_inner_seccomp_command(args: InnerSeccompCommandArgs<'_>) -> Vec<OsString> {
     let InnerSeccompCommandArgs {
         sandbox_policy_cwd,
         command_cwd,
@@ -1530,40 +1584,45 @@ fn build_inner_seccomp_command(args: InnerSeccompCommandArgs<'_>) -> Vec<String>
     };
 
     let mut inner = vec![
-        current_exe.to_string_lossy().to_string(),
-        "--sandbox-policy-cwd".to_string(),
-        sandbox_policy_cwd.to_string_lossy().to_string(),
+        current_exe.into_os_string(),
+        OsString::from("--sandbox-policy-cwd"),
+        sandbox_policy_cwd.as_os_str().to_owned(),
     ];
     if let Some(command_cwd) = command_cwd {
-        inner.push("--command-cwd".to_string());
-        inner.push(command_cwd.to_string_lossy().to_string());
+        inner.push(OsString::from("--command-cwd"));
+        inner.push(command_cwd.as_os_str().to_owned());
     }
     inner.extend([
-        "--permission-profile".to_string(),
-        permission_profile_json,
-        "--apply-seccomp-then-exec".to_string(),
+        OsString::from("--permission-profile"),
+        OsString::from(permission_profile_json),
+        OsString::from("--apply-seccomp-then-exec"),
     ]);
     if allow_network_for_proxy {
-        inner.push("--allow-network-for-proxy".to_string());
+        inner.push(OsString::from("--allow-network-for-proxy"));
         let proxy_route_spec = proxy_route_spec
             .unwrap_or_else(|| panic!("managed proxy mode requires a proxy route spec"));
-        inner.push("--proxy-route-spec".to_string());
-        inner.push(proxy_route_spec);
+        inner.push(OsString::from("--proxy-route-spec"));
+        inner.push(OsString::from(proxy_route_spec));
     }
-    inner.push("--".to_string());
+    if crate::embedding::command_as_pid_1() {
+        inner.push(OsString::from("--embedding-command-as-pid-1"));
+    }
+    inner.push(OsString::from("--"));
     inner.extend(command);
     inner
 }
 
 /// Exec the provided argv, panicking with context if it fails.
-fn exec_or_panic(command: Vec<String>) -> ! {
+fn exec_or_panic(command: Vec<OsString>) -> ! {
     #[expect(clippy::expect_used)]
-    let c_command =
-        CString::new(command[0].as_str()).expect("Failed to convert command to CString");
+    let c_command = CString::new(command[0].as_os_str().as_bytes())
+        .expect("Failed to convert command to CString");
     #[expect(clippy::expect_used)]
     let c_args: Vec<CString> = command
         .iter()
-        .map(|arg| CString::new(arg.as_str()).expect("Failed to convert arg to CString"))
+        .map(|arg| {
+            CString::new(arg.as_os_str().as_bytes()).expect("Failed to convert arg to CString")
+        })
         .collect();
 
     let mut c_args_ptrs: Vec<*const libc::c_char> = c_args.iter().map(|arg| arg.as_ptr()).collect();
@@ -1575,7 +1634,7 @@ fn exec_or_panic(command: Vec<String>) -> ! {
 
     // If execvp returns, there was an error.
     let err = std::io::Error::last_os_error();
-    panic!("Failed to execvp {}: {err}", command[0].as_str());
+    panic!("Failed to execvp {}: {err}", command[0].to_string_lossy());
 }
 
 #[cfg(test)]
