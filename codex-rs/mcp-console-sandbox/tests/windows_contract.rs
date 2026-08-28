@@ -2670,6 +2670,20 @@ fn exercise_lifecycle_contracts(
     );
     assert_successful_outcome(&helper_control_outcome, 0);
 
+    let helper_token_target = vec![
+        fixture.as_os_str().to_owned(),
+        OsString::from("assert-windows-helper-token-unavailable"),
+    ];
+    let helper_token_outcome = run_null_target(
+        executable,
+        state,
+        &helper_token_target,
+        workspace,
+        default_filesystem_rules(workspace),
+        json!({ "mode": "denied" }),
+    );
+    assert_successful_outcome(&helper_token_outcome, 0);
+
     let mut runner = Runner::spawn(executable, state, &exit_target);
     prepare_policy(
         &mut runner,

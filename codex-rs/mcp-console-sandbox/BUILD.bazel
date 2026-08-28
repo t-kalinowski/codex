@@ -24,6 +24,9 @@ RUNNER_TEST_DEPS = all_crate_deps(
 codex_rust_crate(
     name = "mcp-console-sandbox-lib",
     build_script_env = {"MCP_CONSOLE_SANDBOX_BAZEL_BUILD": "1"},
+    binary_tags = {
+        "mcp-console-sandbox": ["manual"],
+    },
     crate_name = "codex_mcp_console_sandbox",
     deps_override = RUNNER_DEPS,
     extra_binaries = [
@@ -41,6 +44,7 @@ codex_rust_crate(
     # native executable contract suite.
     test_tags = [
         "manual",
+        "mcp-console-sandbox-config-required",
         "no-sandbox",
     ],
 )

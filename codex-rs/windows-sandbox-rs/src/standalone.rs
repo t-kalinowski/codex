@@ -8,6 +8,7 @@
 mod client;
 mod compatibility;
 mod helper;
+mod process_security;
 mod setup;
 mod wire;
 

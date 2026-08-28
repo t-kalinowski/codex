@@ -263,76 +263,83 @@ mod unix {
         owner
             .write_all(&[WATCHDOG_READY])
             .context("report watchdog readiness")?;
-        #[cfg(target_os = "linux")]
-        let mut namespace_process = None;
-        loop {
+        #[cfg(not(target_os = "linux"))]
+        {
             let mut command = [0_u8; 1];
             if owner.read_exact(&mut command).is_err() {
-                return retire_owned_processes(
-                    process_group_id,
-                    #[cfg(target_os = "linux")]
-                    namespace_process.as_ref(),
-                );
+                return retire_owned_processes(process_group_id);
             }
             match command[0] {
-                WATCHDOG_DISARM => {
-                    #[cfg(target_os = "linux")]
-                    if let Some(process) = namespace_process.as_ref() {
-                        match process.has_exited() {
-                            Ok(true) => {}
-                            Ok(false) => {
-                                retire_owned_processes(
-                                    process_group_id,
-                                    namespace_process.as_ref(),
-                                )?;
-                                anyhow::bail!(
-                                    "namespace process remained active while disarming watchdog"
-                                );
-                            }
-                            Err(error) => {
-                                retire_owned_processes(
-                                    process_group_id,
-                                    namespace_process.as_ref(),
-                                )?;
-                                return Err(error).context("inspect namespace process retirement");
+                WATCHDOG_DISARM => Ok(()),
+                _ => {
+                    retire_owned_processes(process_group_id)?;
+                    anyhow::bail!("watchdog received an invalid owner command");
+                }
+            }
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let mut namespace_process = None;
+            loop {
+                let mut command = [0_u8; 1];
+                if owner.read_exact(&mut command).is_err() {
+                    return retire_owned_processes(process_group_id, namespace_process.as_ref());
+                }
+                match command[0] {
+                    WATCHDOG_DISARM => {
+                        if let Some(process) = namespace_process.as_ref() {
+                            match process.has_exited() {
+                                Ok(true) => {}
+                                Ok(false) => {
+                                    retire_owned_processes(
+                                        process_group_id,
+                                        namespace_process.as_ref(),
+                                    )?;
+                                    anyhow::bail!(
+                                        "namespace process remained active while disarming watchdog"
+                                    );
+                                }
+                                Err(error) => {
+                                    retire_owned_processes(
+                                        process_group_id,
+                                        namespace_process.as_ref(),
+                                    )?;
+                                    return Err(error)
+                                        .context("inspect namespace process retirement");
+                                }
                             }
                         }
+                        return Ok(());
                     }
-                    return Ok(());
-                }
-                #[cfg(target_os = "linux")]
-                WATCHDOG_REGISTER_NAMESPACE_PROCESS => {
-                    let registration = (|| -> Result<()> {
-                        anyhow::ensure!(
-                            namespace_process.is_none(),
-                            "watchdog namespace process is already registered"
-                        );
-                        let mut process_id = [0_u8; 4];
-                        owner
-                            .read_exact(&mut process_id)
-                            .context("read watchdog namespace process ID")?;
-                        namespace_process = Some(
-                            crate::linux_process::LinuxProcess::open(u32::from_be_bytes(
-                                process_id,
-                            ))
-                            .context("open watchdog namespace process")?,
-                        );
-                        owner
-                            .write_all(&[WATCHDOG_REGISTERED])
-                            .context("acknowledge watchdog namespace registration")
-                    })();
-                    if let Err(error) = registration {
+                    WATCHDOG_REGISTER_NAMESPACE_PROCESS => {
+                        let registration = (|| -> Result<()> {
+                            anyhow::ensure!(
+                                namespace_process.is_none(),
+                                "watchdog namespace process is already registered"
+                            );
+                            let mut process_id = [0_u8; 4];
+                            owner
+                                .read_exact(&mut process_id)
+                                .context("read watchdog namespace process ID")?;
+                            namespace_process = Some(
+                                crate::linux_process::LinuxProcess::open(u32::from_be_bytes(
+                                    process_id,
+                                ))
+                                .context("open watchdog namespace process")?,
+                            );
+                            owner
+                                .write_all(&[WATCHDOG_REGISTERED])
+                                .context("acknowledge watchdog namespace registration")
+                        })();
+                        if let Err(error) = registration {
+                            retire_owned_processes(process_group_id, namespace_process.as_ref())?;
+                            return Err(error);
+                        }
+                    }
+                    _ => {
                         retire_owned_processes(process_group_id, namespace_process.as_ref())?;
-                        return Err(error);
+                        anyhow::bail!("watchdog received an invalid owner command");
                     }
-                }
-                _ => {
-                    retire_owned_processes(
-                        process_group_id,
-                        #[cfg(target_os = "linux")]
-                        namespace_process.as_ref(),
-                    )?;
-                    anyhow::bail!("watchdog received an invalid owner command");
                 }
             }
         }

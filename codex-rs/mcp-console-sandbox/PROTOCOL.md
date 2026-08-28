@@ -484,8 +484,12 @@ other error or uncertainty after preparation-gate release returns
 generation and remains observable through `status` and `wait` even when target
 application code never ran.
 
-On Windows, the standalone helper creates the target suspended and assigns it
-to its non-breakaway Job Object before sending `Ready`. The outer runner first
+On Windows, the outer runner creates the standalone helper suspended, verifies
+that the runner and sandbox `TokenUser` SIDs differ, and replaces the helper
+process owner and protected DACL with runner- and `SYSTEM`-only access before
+resuming it. Failure leaves the helper suspended and terminates it before it
+can create a target. The standalone helper then creates the target suspended
+and assigns it to its non-breakaway Job Object before sending `Ready`. The outer runner first
 installs the supervisor and releases unnecessary stream copies, then sends
 `CommitLaunch`. The helper resumes the target and sends `Committed` before the
 runner returns `launch_accepted`. Once the `Spawn` request may have reached the

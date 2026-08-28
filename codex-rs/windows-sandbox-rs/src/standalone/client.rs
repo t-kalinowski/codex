@@ -11,6 +11,7 @@ use super::setup::refresh_windows_sandbox_standalone_with_policy_lease;
 use super::setup::validate_setup_request;
 use super::setup::verify_windows_sandbox_standalone_network_with_policy_lease;
 use super::setup::windows_sandbox_standalone_setup_status;
+use super::process_security::HelperProcessSecurity;
 use super::wire::HelperMessage;
 use super::wire::ParentMessage;
 use super::wire::WireNativeString;
@@ -55,10 +56,12 @@ use windows_sys::Win32::System::Console::STD_INPUT_HANDLE;
 use windows_sys::Win32::System::Console::STD_OUTPUT_HANDLE;
 use windows_sys::Win32::System::Diagnostics::Debug::SetErrorMode;
 use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+use windows_sys::Win32::System::Threading::CREATE_SUSPENDED;
 use windows_sys::Win32::System::Threading::CREATE_UNICODE_ENVIRONMENT;
 use windows_sys::Win32::System::Threading::CreateProcessWithLogonW;
 use windows_sys::Win32::System::Threading::GetCurrentProcess;
 use windows_sys::Win32::System::Threading::PROCESS_INFORMATION;
+use windows_sys::Win32::System::Threading::ResumeThread;
 use windows_sys::Win32::System::Threading::STARTUPINFOW;
 use windows_sys::Win32::System::Threading::TerminateProcess;
 use windows_sys::Win32::System::Threading::WaitForSingleObject;
@@ -205,6 +208,7 @@ fn spawn_helper(
     request: &WindowsSandboxStandaloneSetupRequest,
     creds: &SandboxCreds,
 ) -> Result<(PROCESS_INFORMATION, File, File)> {
+    let mut process_security = HelperProcessSecurity::prepare(creds)?;
     let (pipe_in_name, pipe_out_name) = pipe_pair();
     let input_pipe = create_named_pipe(&pipe_in_name, PIPE_ACCESS_OUTBOUND, &creds.username)?;
     let output_pipe = create_named_pipe(&pipe_out_name, PIPE_ACCESS_INBOUND, &creds.username)?;
@@ -237,7 +241,7 @@ fn spawn_helper(
             /*dwlogonflags*/ 0,
             executable.as_ptr(),
             command_line.as_mut_ptr(),
-            CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
+            CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT,
             environment.as_ptr().cast(),
             cwd.as_ptr(),
             &startup_info,
@@ -257,6 +261,15 @@ fn spawn_helper(
     }
 
     let connect_result = (|| -> Result<()> {
+        process_security
+            .apply(process_info.hProcess)
+            .context("seal standalone helper process")?;
+        if unsafe { ResumeThread(process_info.hThread) } == u32::MAX {
+            anyhow::bail!(
+                "ResumeThread failed for standalone helper: {}",
+                unsafe { GetLastError() }
+            );
+        }
         connect_pipe_with_timeout(input_pipe, process_info.dwProcessId, "standalone pipe-in")?;
         connect_pipe_with_timeout(output_pipe, process_info.dwProcessId, "standalone pipe-out")?;
         Ok(())

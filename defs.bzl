@@ -193,6 +193,8 @@ def codex_rust_crate(
         build_script_env = {},
         compile_data = [],
         binary_compile_data_extra = {},
+        binary_rustc_env_extra = {},
+        binary_tags = {},
         lib_data_extra = [],
         lib_stamp = 0,
         rustc_flags_extra = [],
@@ -241,6 +243,9 @@ def codex_rust_crate(
         compile_data: Non-Rust compile-time data for the library target.
         binary_compile_data_extra: Mapping from binary names to extra non-Rust
             compile-time data for those binary targets.
+        binary_rustc_env_extra: Mapping from binary names to extra compiler
+            environment entries for those binary targets.
+        binary_tags: Mapping from binary names to tags for those targets.
         lib_data_extra: Extra runtime data for the library target.
         lib_stamp: Stamp workspace-status values into the library target.
         binary_rustc_flags_extra: Mapping from binary names to extra rustc
@@ -424,9 +429,10 @@ def codex_rust_crate(
             rustc_flags = rustc_flags_extra + binary_rustc_flags_extra.get(binary, []) + WINDOWS_RUSTC_LINK_FLAGS,
             # rules_rust substitutes workspace status values only for stamped
             # actions, so pass the existing key through to final binaries.
-            rustc_env = rustc_env | {"STABLE_GIT_COMMIT": "{STABLE_GIT_COMMIT}"},
+            rustc_env = binary_rustc_env_extra.get(binary, {}) | {"STABLE_GIT_COMMIT": "{STABLE_GIT_COMMIT}"},
             srcs = native.glob(["src/**/*.rs"]),
             stamp = 1,
+            tags = binary_tags.get(binary, []),
             visibility = ["//visibility:public"],
         )
 

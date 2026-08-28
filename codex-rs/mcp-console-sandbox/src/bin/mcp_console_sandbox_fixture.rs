@@ -64,6 +64,10 @@ fn main() {
         Some("attempt-windows-job-breakaway") => attempt_windows_job_breakaway(),
         #[cfg(windows)]
         Some("assert-windows-helper-control-denied") => assert_windows_helper_control_denied(),
+        #[cfg(windows)]
+        Some("assert-windows-helper-token-unavailable") => {
+            assert_windows_helper_token_unavailable()
+        }
         #[cfg(all(unix, not(target_os = "linux")))]
         Some("spawn-reporting-descendant") => spawn_reporting_descendant(arguments.next()),
         #[cfg(target_os = "linux")]
@@ -604,6 +608,86 @@ fn assert_windows_helper_control_denied() -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[cfg(windows)]
+fn assert_windows_helper_token_unavailable() -> Result<(), String> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED;
+    use windows_sys::Win32::Security::DuplicateToken;
+    use windows_sys::Win32::Security::ImpersonateLoggedOnUser;
+    use windows_sys::Win32::Security::RevertToSelf;
+    use windows_sys::Win32::Security::SecurityImpersonation;
+    use windows_sys::Win32::Security::TOKEN_DUPLICATE;
+    use windows_sys::Win32::Security::TOKEN_QUERY;
+    use windows_sys::Win32::System::Threading::OpenProcess;
+    use windows_sys::Win32::System::Threading::OpenProcessToken;
+    use windows_sys::Win32::System::Threading::PROCESS_QUERY_LIMITED_INFORMATION;
+
+    let helper_process_id = windows_parent_process_id()?;
+    let helper_process = unsafe {
+        OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION,
+            /*b_inherit_handle*/ 0,
+            helper_process_id,
+        )
+    };
+    if helper_process == 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32) {
+            return Ok(());
+        }
+        return Err(format!(
+            "opening the standalone helper for token query failed with unexpected error: {error}"
+        ));
+    }
+
+    let mut helper_token = 0;
+    let opened_token = unsafe {
+        OpenProcessToken(
+            helper_process,
+            TOKEN_QUERY | TOKEN_DUPLICATE,
+            &mut helper_token,
+        )
+    };
+    unsafe { CloseHandle(helper_process) };
+    if opened_token == 0 {
+        let error = std::io::Error::last_os_error();
+        return Err(format!(
+            "sandbox target could query its standalone helper process; opening its token failed: {error}"
+        ));
+    }
+
+    let mut duplicate = 0;
+    let duplicated = unsafe { DuplicateToken(helper_token, SecurityImpersonation, &mut duplicate) };
+    if duplicated == 0 {
+        let error = std::io::Error::last_os_error();
+        unsafe { CloseHandle(helper_token) };
+        return Err(format!(
+            "sandbox target obtained its standalone helper token; duplicating it failed: {error}"
+        ));
+    }
+    let impersonated = unsafe { ImpersonateLoggedOnUser(duplicate) };
+    let impersonation_error = if impersonated == 0 {
+        Some(std::io::Error::last_os_error())
+    } else {
+        None
+    };
+    if impersonated != 0 {
+        unsafe {
+            let _ = RevertToSelf();
+        }
+    }
+    unsafe {
+        CloseHandle(duplicate);
+        CloseHandle(helper_token);
+    }
+    if let Some(error) = impersonation_error {
+        return Err(format!(
+            "sandbox target duplicated its standalone helper token; impersonating it failed: {error}"
+        ));
+    }
+    Err("sandbox target impersonated its unrestricted standalone helper token".to_string())
 }
 
 #[cfg(windows)]

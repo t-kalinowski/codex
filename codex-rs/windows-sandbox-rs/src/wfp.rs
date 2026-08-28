@@ -2,6 +2,7 @@ mod filter_specs;
 
 use crate::WindowsSandboxPolicyNamespace;
 use crate::to_wide;
+use crate::winutil::resolve_sid;
 use anyhow::Result;
 use std::ffi::OsStr;
 use std::ffi::c_void;
@@ -48,14 +49,18 @@ use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::FwpmFilterD
 use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::FwpmFilterGetByKey0;
 use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::FwpmFreeMemory0;
 use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::FwpmProviderAdd0;
+use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::FwpmProviderGetByKey0;
 use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::FwpmSubLayerAdd0;
+use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::FwpmSubLayerGetByKey0;
 use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::FwpmTransactionAbort0;
 use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::FwpmTransactionBegin0;
 use windows_sys::Win32::NetworkManagement::WindowsFilteringPlatform::FwpmTransactionCommit0;
-use windows_sys::Win32::Security::Authorization::BuildExplicitAccessWithNameW;
 use windows_sys::Win32::Security::Authorization::BuildSecurityDescriptorW;
 use windows_sys::Win32::Security::Authorization::EXPLICIT_ACCESS_W;
 use windows_sys::Win32::Security::Authorization::GRANT_ACCESS;
+use windows_sys::Win32::Security::Authorization::TRUSTEE_IS_SID;
+use windows_sys::Win32::Security::Authorization::TRUSTEE_IS_UNKNOWN;
+use windows_sys::Win32::Security::Authorization::TRUSTEE_W;
 use windows_sys::Win32::Security::PSECURITY_DESCRIPTOR;
 use windows_sys::Win32::System::Rpc::RPC_C_AUTHN_DEFAULT;
 use windows_sys::Win32::System::Threading::INFINITE;
@@ -70,6 +75,7 @@ const PROVIDER_NAME: &str = "Codex Windows Sandbox WFP";
 const PROVIDER_DESCRIPTION: &str = "Persistent WFP provider for Codex Windows sandbox filters";
 const SUBLAYER_NAME: &str = "Codex Windows Sandbox WFP";
 const SUBLAYER_DESCRIPTION: &str = "Persistent WFP sublayer for Codex Windows sandbox filters";
+const SUBLAYER_WEIGHT: u16 = 0x8000;
 
 // WFP identifies persistent providers, sublayers, and filters by stable GUIDs.
 // These values are Codex-owned identities; do not regenerate them unless we
@@ -116,6 +122,8 @@ pub fn verify_wfp_filters_for_account_in_namespace(
     namespace: WindowsSandboxPolicyNamespace,
 ) -> Result<()> {
     let engine = Engine::open()?;
+    verify_provider(engine.handle)?;
+    verify_sublayer(engine.handle)?;
     let user_condition = UserMatchCondition::for_account(account)?;
     for spec in FILTER_SPECS {
         verify_filter(engine.handle, spec, namespace, &user_condition)?;
@@ -146,6 +154,110 @@ impl Drop for RetrievedFilter {
         let mut filter = self.0.cast::<c_void>();
         unsafe { FwpmFreeMemory0(&mut filter) };
     }
+}
+
+struct RetrievedProvider(*mut FWPM_PROVIDER0);
+
+impl RetrievedProvider {
+    fn get(engine: HANDLE) -> Result<Self> {
+        let mut provider = null_mut();
+        let result = unsafe { FwpmProviderGetByKey0(engine, &PROVIDER_KEY, &mut provider) };
+        ensure_success(result, "FwpmProviderGetByKey0")?;
+        if provider.is_null() {
+            anyhow::bail!("FwpmProviderGetByKey0 returned a null provider");
+        }
+        Ok(Self(provider))
+    }
+
+    fn as_ref(&self) -> &FWPM_PROVIDER0 {
+        unsafe { &*self.0 }
+    }
+}
+
+impl Drop for RetrievedProvider {
+    fn drop(&mut self) {
+        let mut provider = self.0.cast::<c_void>();
+        unsafe { FwpmFreeMemory0(&mut provider) };
+    }
+}
+
+struct RetrievedSublayer(*mut FWPM_SUBLAYER0);
+
+impl RetrievedSublayer {
+    fn get(engine: HANDLE) -> Result<Self> {
+        let mut sublayer = null_mut();
+        let result = unsafe { FwpmSubLayerGetByKey0(engine, &SUBLAYER_KEY, &mut sublayer) };
+        ensure_success(result, "FwpmSubLayerGetByKey0")?;
+        if sublayer.is_null() {
+            anyhow::bail!("FwpmSubLayerGetByKey0 returned a null sublayer");
+        }
+        Ok(Self(sublayer))
+    }
+
+    fn as_ref(&self) -> &FWPM_SUBLAYER0 {
+        unsafe { &*self.0 }
+    }
+}
+
+impl Drop for RetrievedSublayer {
+    fn drop(&mut self) {
+        let mut sublayer = self.0.cast::<c_void>();
+        unsafe { FwpmFreeMemory0(&mut sublayer) };
+    }
+}
+
+fn verify_provider(engine: HANDLE) -> Result<()> {
+    let retrieved = RetrievedProvider::get(engine)
+        .map_err(|error| anyhow::anyhow!("WFP provider is unavailable: {error}"))?;
+    let provider = retrieved.as_ref();
+    if !guid_eq(&provider.providerKey, &PROVIDER_KEY) {
+        anyhow::bail!("WFP provider has an incompatible key");
+    }
+    if provider.flags != FWPM_PROVIDER_FLAG_PERSISTENT {
+        anyhow::bail!(
+            "WFP provider has incompatible flags 0x{:08X}; expected persistent-only flags 0x{:08X}",
+            provider.flags,
+            FWPM_PROVIDER_FLAG_PERSISTENT
+        );
+    }
+    if provider.providerData.size != 0 {
+        anyhow::bail!("WFP provider has incompatible provider data");
+    }
+    if !provider.serviceName.is_null() {
+        anyhow::bail!("WFP provider is unexpectedly associated with a Windows service");
+    }
+    Ok(())
+}
+
+fn verify_sublayer(engine: HANDLE) -> Result<()> {
+    let retrieved = RetrievedSublayer::get(engine)
+        .map_err(|error| anyhow::anyhow!("WFP sublayer is unavailable: {error}"))?;
+    let sublayer = retrieved.as_ref();
+    if !guid_eq(&sublayer.subLayerKey, &SUBLAYER_KEY) {
+        anyhow::bail!("WFP sublayer has an incompatible key");
+    }
+    if sublayer.flags != FWPM_SUBLAYER_FLAG_PERSISTENT {
+        anyhow::bail!(
+            "WFP sublayer has incompatible flags 0x{:08X}; expected persistent-only flags 0x{:08X}",
+            sublayer.flags,
+            FWPM_SUBLAYER_FLAG_PERSISTENT
+        );
+    }
+    if sublayer.providerKey.is_null()
+        || !unsafe { guid_eq(&*sublayer.providerKey, &PROVIDER_KEY) }
+    {
+        anyhow::bail!("WFP sublayer is associated with an incompatible provider");
+    }
+    if sublayer.providerData.size != 0 {
+        anyhow::bail!("WFP sublayer has incompatible provider data");
+    }
+    if sublayer.weight != SUBLAYER_WEIGHT {
+        anyhow::bail!(
+            "WFP sublayer has incompatible weight 0x{:04X}; expected 0x{SUBLAYER_WEIGHT:04X}",
+            sublayer.weight
+        );
+    }
+    Ok(())
 }
 
 fn verify_filter(
@@ -341,17 +453,19 @@ struct UserMatchCondition {
 
 impl UserMatchCondition {
     fn for_account(account: &str) -> Result<Self> {
-        let account_w = to_wide(OsStr::new(account));
-        let mut access: EXPLICIT_ACCESS_W = unsafe { zeroed() };
-        unsafe {
-            BuildExplicitAccessWithNameW(
-                &mut access,
-                account_w.as_ptr(),
-                FWP_ACTRL_MATCH_FILTER,
-                GRANT_ACCESS,
-                0,
-            );
-        }
+        let sid = resolve_sid(account)?;
+        let access = EXPLICIT_ACCESS_W {
+            grfAccessPermissions: FWP_ACTRL_MATCH_FILTER,
+            grfAccessMode: GRANT_ACCESS,
+            grfInheritance: 0,
+            Trustee: TRUSTEE_W {
+                pMultipleTrustee: null_mut(),
+                MultipleTrusteeOperation: 0,
+                TrusteeForm: TRUSTEE_IS_SID,
+                TrusteeType: TRUSTEE_IS_UNKNOWN,
+                ptstrName: sid.as_ptr() as *mut u16,
+            },
+        };
 
         let mut security_descriptor: PSECURITY_DESCRIPTOR = null_mut();
         let mut security_descriptor_len = 0;
@@ -406,7 +520,8 @@ fn ensure_provider(engine: HANDLE) -> Result<()> {
     };
 
     let result = unsafe { FwpmProviderAdd0(engine, &provider, null_mut()) };
-    ensure_success_or(result, "FwpmProviderAdd0", &[FWP_E_ALREADY_EXISTS as u32])
+    ensure_success_or(result, "FwpmProviderAdd0", &[FWP_E_ALREADY_EXISTS as u32])?;
+    verify_provider(engine)
 }
 
 /// Ensures the persistent Codex sublayer exists under the Codex provider.
@@ -423,11 +538,12 @@ fn ensure_sublayer(engine: HANDLE) -> Result<()> {
         flags: FWPM_SUBLAYER_FLAG_PERSISTENT,
         providerKey: &provider_key as *const _ as *mut _,
         providerData: empty_blob(),
-        weight: 0x8000,
+        weight: SUBLAYER_WEIGHT,
     };
 
     let result = unsafe { FwpmSubLayerAdd0(engine, &sublayer, null_mut()) };
-    ensure_success_or(result, "FwpmSubLayerAdd0", &[FWP_E_ALREADY_EXISTS as u32])
+    ensure_success_or(result, "FwpmSubLayerAdd0", &[FWP_E_ALREADY_EXISTS as u32])?;
+    verify_sublayer(engine)
 }
 
 /// Adds one blocking WFP filter from the static filter spec list.
