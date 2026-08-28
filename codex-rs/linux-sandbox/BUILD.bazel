@@ -1,4 +1,11 @@
+load("@crates//:defs.bzl", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_library")
 load("//:defs.bzl", "codex_rust_crate")
+
+BWRAP_DIGEST_ENV = select({
+    "@platforms//os:linux": ["//codex-rs/bwrap:bwrap-sha256-env"],
+    "//conditions:default": [],
+})
 
 codex_rust_crate(
     name = "linux-sandbox",
@@ -6,8 +13,32 @@ codex_rust_crate(
     extra_binaries = [
         "//codex-rs/bwrap:bwrap",
     ],
-    rustc_env_files = select({
-        "@platforms//os:linux": ["//codex-rs/bwrap:bwrap-sha256-env"],
-        "//conditions:default": [],
-    }),
+    rustc_env_files = BWRAP_DIGEST_ENV,
+)
+
+# Private build edge used by the MCP Console runner. It keeps the Linux
+# implementation identical while selecting the feature-free sandboxing edge.
+rust_library(
+    name = "linux-sandbox-no-windows-telemetry",
+    srcs = glob(
+        ["src/**/*.rs"],
+        exclude = ["src/main.rs"],
+    ),
+    crate_name = "codex_linux_sandbox",
+    edition = "2024",
+    rustc_env = {
+        "BAZEL_PACKAGE": "codex-rs/linux-sandbox",
+        "CARGO_PKG_VERSION": "{STABLE_CODEX_WORKSPACE_VERSION}",
+    },
+    rustc_env_files = BWRAP_DIGEST_ENV,
+    stamp = 1,
+    visibility = ["//codex-rs/mcp-console-sandbox:__pkg__"],
+    deps = all_crate_deps(cargo_only = True) + [
+        "//codex-rs/install-context",
+        "//codex-rs/network-proxy",
+        "//codex-rs/process-hardening",
+        "//codex-rs/protocol",
+        "//codex-rs/sandboxing:sandboxing-no-windows-telemetry",
+        "//codex-rs/utils/absolute-path",
+    ],
 )
