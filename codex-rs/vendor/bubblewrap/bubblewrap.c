@@ -66,6 +66,7 @@ static int proc_fd = -1;
 static const char *opt_exec_label = NULL;
 static const char *opt_file_label = NULL;
 static bool opt_as_pid_1;
+static bool opt_codex_close_monitor_standard_streams;
 
 static const char *opt_argv0 = NULL;
 static const char *opt_chdir_path = NULL;
@@ -389,6 +390,34 @@ handle_die_with_parent (void)
 {
   if (opt_die_with_parent && prctl (PR_SET_PDEATHSIG, SIGKILL, 0, 0, 0) != 0)
     die_with_error ("prctl");
+}
+
+static int
+redirect_monitor_standard_streams (void)
+{
+  int null_fd;
+  int saved_errno;
+  int target_fd;
+
+  null_fd = TEMP_FAILURE_RETRY (open ("/dev/null", O_RDWR | O_CLOEXEC));
+  if (null_fd == -1)
+    return -1;
+
+  for (target_fd = STDIN_FILENO; target_fd <= STDERR_FILENO; target_fd++)
+    {
+      if (TEMP_FAILURE_RETRY (dup2 (null_fd, target_fd)) == -1)
+        {
+          saved_errno = errno;
+          if (null_fd > STDERR_FILENO)
+            close (null_fd);
+          errno = saved_errno;
+          return -1;
+        }
+    }
+
+  if (null_fd > STDERR_FILENO)
+    close (null_fd);
+  return 0;
 }
 
 static void
@@ -2618,6 +2647,10 @@ parse_args_recurse (int          *argcp,
         {
           opt_as_pid_1 = true;
         }
+      else if (strcmp (arg, "--codex-close-monitor-standard-streams") == 0)
+        {
+          opt_codex_close_monitor_standard_streams = true;
+        }
       else if (strcmp (arg, "--cap-add") == 0)
         {
           cap_value_t cap;
@@ -3061,6 +3094,9 @@ main (int    argc,
   if (opt_as_pid_1 && lock_files != NULL)
     die ("Specifying --as-pid-1 and --lock-file is not permitted");
 
+  if (opt_codex_close_monitor_standard_streams && !opt_as_pid_1)
+    die ("Specifying --codex-close-monitor-standard-streams requires --as-pid-1");
+
   /* We need to read stuff from proc during the pivot_root dance, etc.
      Lets keep a fd to it open */
   proc_fd = TEMP_FAILURE_RETRY (open ("/proc", O_PATH));
@@ -3233,6 +3269,15 @@ main (int    argc,
       res = TEMP_FAILURE_RETRY (write (child_wait_fd, &val, 8));
       /* Ignore res, if e.g. the child died and closed child_wait_fd we don't want to error out here */
       close (child_wait_fd);
+
+      if (opt_codex_close_monitor_standard_streams && redirect_monitor_standard_streams () == -1)
+        {
+          int saved_errno = errno;
+          (void) kill (pid, SIGKILL);
+          (void) TEMP_FAILURE_RETRY (waitpid (pid, NULL, 0));
+          errno = saved_errno;
+          die_with_error ("Failed to release bubblewrap monitor standard streams");
+        }
 
       return monitor_child (event_fd, pid, setup_finished_pipe[0]);
     }

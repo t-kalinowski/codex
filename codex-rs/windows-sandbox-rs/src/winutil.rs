@@ -1,5 +1,6 @@
 use anyhow::Result;
 use std::ffi::OsStr;
+use std::ffi::OsString;
 use std::os::windows::ffi::OsStrExt;
 use windows_sys::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER;
 use windows_sys::Win32::Foundation::GetLastError;
@@ -71,6 +72,56 @@ pub fn argv_to_command_line(argv: &[String]) -> String {
         .map(|arg| quote_windows_arg(arg))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Builds a NUL-terminated Windows command line without converting native
+/// arguments through UTF-8.
+pub(crate) fn native_argv_to_command_line(argv: &[OsString]) -> Result<Vec<u16>> {
+    let mut command_line = Vec::new();
+    for (index, argument) in argv.iter().enumerate() {
+        if index != 0 {
+            command_line.push(b' ' as u16);
+        }
+        append_quoted_native_arg(&mut command_line, argument.as_os_str())?;
+    }
+    command_line.push(0);
+    Ok(command_line)
+}
+
+fn append_quoted_native_arg(command_line: &mut Vec<u16>, argument: &OsStr) -> Result<()> {
+    let argument = argument.encode_wide().collect::<Vec<_>>();
+    if argument.contains(&0) {
+        anyhow::bail!("Windows command argument contains an embedded NUL");
+    }
+    let needs_quotes = argument.is_empty()
+        || argument
+            .iter()
+            .any(|unit| matches!(*unit, 0x20 | 0x09 | 0x0a | 0x0d | 0x22));
+    if !needs_quotes {
+        command_line.extend_from_slice(&argument);
+        return Ok(());
+    }
+
+    command_line.push(b'"' as u16);
+    let mut backslashes = 0;
+    for unit in argument {
+        match unit {
+            0x5c => backslashes += 1,
+            0x22 => {
+                command_line.extend(std::iter::repeat_n(0x5c, backslashes * 2 + 1));
+                command_line.push(0x22);
+                backslashes = 0;
+            }
+            _ => {
+                command_line.extend(std::iter::repeat_n(0x5c, backslashes));
+                backslashes = 0;
+                command_line.push(unit);
+            }
+        }
+    }
+    command_line.extend(std::iter::repeat_n(0x5c, backslashes * 2));
+    command_line.push(b'"' as u16);
+    Ok(())
 }
 
 // Produce a readable description for a Win32 error code.
