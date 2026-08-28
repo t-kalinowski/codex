@@ -1,6 +1,7 @@
 mod filter_specs;
 
 use crate::to_wide;
+use crate::WindowsSandboxPolicyNamespace;
 use anyhow::Result;
 use std::ffi::OsStr;
 use std::mem::zeroed;
@@ -77,6 +78,18 @@ const SUBLAYER_KEY: GUID = GUID::from_u128(0xe65054fd_4d32_4c7c_95ef_621f0cf6431
 /// This is intended to run from the already-elevated setup helper. Callers
 /// should treat any returned error as non-fatal to the rest of setup.
 pub fn install_wfp_filters_for_account(account: &str) -> Result<usize> {
+    install_wfp_filters_for_account_in_namespace(
+        account,
+        WindowsSandboxPolicyNamespace::Codex,
+    )
+}
+
+/// Installs the persistent WFP filters for one closed Windows sandbox policy namespace.
+#[doc(hidden)]
+pub fn install_wfp_filters_for_account_in_namespace(
+    account: &str,
+    namespace: WindowsSandboxPolicyNamespace,
+) -> Result<usize> {
     let engine = Engine::open()?;
     let mut transaction = engine.begin_transaction()?;
     ensure_provider(engine.handle)?;
@@ -85,8 +98,8 @@ pub fn install_wfp_filters_for_account(account: &str) -> Result<usize> {
     let user_condition = UserMatchCondition::for_account(account)?;
     let mut installed_filter_count = 0;
     for spec in FILTER_SPECS {
-        delete_filter_if_present(engine.handle, &spec.key)?;
-        add_filter(engine.handle, spec, &user_condition)?;
+        delete_filter_if_present(engine.handle, &spec.key(namespace))?;
+        add_filter(engine.handle, spec, namespace, &user_condition)?;
         installed_filter_count += 1;
     }
 
@@ -267,14 +280,15 @@ fn ensure_sublayer(engine: HANDLE) -> Result<()> {
 fn add_filter(
     engine: HANDLE,
     spec: &FilterSpec,
+    namespace: WindowsSandboxPolicyNamespace,
     user_condition: &UserMatchCondition,
 ) -> Result<()> {
-    let filter_name = to_wide(OsStr::new(spec.name));
+    let filter_name = to_wide(OsStr::new(spec.name(namespace)));
     let filter_description = to_wide(OsStr::new(spec.description));
     let mut filter_conditions = build_conditions(spec.conditions, user_condition);
     let provider_key = PROVIDER_KEY;
     let filter = FWPM_FILTER0 {
-        filterKey: spec.key,
+        filterKey: spec.key(namespace),
         displayData: FWPM_DISPLAY_DATA0 {
             name: filter_name.as_ptr() as *mut _,
             description: filter_description.as_ptr() as *mut _,
@@ -301,7 +315,10 @@ fn add_filter(
 
     let mut filter_id = 0_u64;
     let result = unsafe { FwpmFilterAdd0(engine, &filter, null_mut(), &mut filter_id) };
-    ensure_success(result, &format!("FwpmFilterAdd0({})", spec.name))
+    ensure_success(
+        result,
+        &format!("FwpmFilterAdd0({})", spec.name(namespace)),
+    )
 }
 
 /// Converts our compact condition specs into WFP filter conditions.
@@ -392,31 +409,39 @@ fn zero_guid() -> GUID {
 #[cfg(test)]
 mod tests {
     use super::FILTER_SPECS;
+    use crate::policy_namespace::WindowsSandboxPolicyNamespace;
     use pretty_assertions::assert_eq;
     use std::collections::BTreeSet;
 
     #[test]
-    fn filter_keys_are_unique() {
-        let keys = FILTER_SPECS
-            .iter()
-            .map(|spec| {
+    fn policy_namespace_filter_keys_are_disjoint() {
+        let keys = [
+            WindowsSandboxPolicyNamespace::Codex,
+            WindowsSandboxPolicyNamespace::McpConsole,
+        ]
+        .into_iter()
+        .flat_map(|namespace| FILTER_SPECS.iter().map(move |spec| spec.key(namespace)))
+        .map(|key| {
                 (
-                    spec.key.data1,
-                    spec.key.data2,
-                    spec.key.data3,
-                    spec.key.data4,
+                    key.data1,
+                    key.data2,
+                    key.data3,
+                    key.data4,
                 )
-            })
-            .collect::<BTreeSet<_>>();
-        assert_eq!(keys.len(), FILTER_SPECS.len());
+        })
+        .collect::<BTreeSet<_>>();
+        assert_eq!(keys.len(), FILTER_SPECS.len() * 2);
     }
 
     #[test]
-    fn filter_names_are_unique() {
-        let names = FILTER_SPECS
-            .iter()
-            .map(|spec| spec.name)
-            .collect::<BTreeSet<_>>();
-        assert_eq!(names.len(), FILTER_SPECS.len());
+    fn policy_namespace_filter_names_are_disjoint() {
+        let names = [
+            WindowsSandboxPolicyNamespace::Codex,
+            WindowsSandboxPolicyNamespace::McpConsole,
+        ]
+        .into_iter()
+        .flat_map(|namespace| FILTER_SPECS.iter().map(move |spec| spec.name(namespace)))
+        .collect::<BTreeSet<_>>();
+        assert_eq!(names.len(), FILTER_SPECS.len() * 2);
     }
 }

@@ -1,10 +1,11 @@
-use crate::install_wfp_filters_for_account;
+use crate::WindowsSandboxStatsigMetricsSettings;
+use crate::WindowsSandboxPolicyNamespace;
+use crate::install_wfp_filters_for_account_in_namespace;
 use crate::setup_error::sanitize_setup_metric_tag_value;
 use anyhow::Result;
 use codex_otel::OtelExporter;
 use codex_otel::OtelProvider;
 use codex_otel::OtelSettings;
-use codex_otel::StatsigMetricsSettings;
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -37,7 +38,7 @@ fn panic_payload_to_string(panic_payload: Box<dyn std::any::Any + Send>) -> Stri
 
 fn build_wfp_metrics_provider(
     codex_home: &Path,
-    otel: Option<&StatsigMetricsSettings>,
+    otel: Option<&WindowsSandboxStatsigMetricsSettings>,
 ) -> Result<Option<OtelProvider>> {
     let Some(otel) = otel else {
         return Ok(None);
@@ -63,7 +64,7 @@ fn build_wfp_metrics_provider(
 
 fn emit_wfp_setup_metric(
     codex_home: &Path,
-    otel: Option<&StatsigMetricsSettings>,
+    otel: Option<&WindowsSandboxStatsigMetricsSettings>,
     metric: &WfpSetupMetric,
 ) -> Result<()> {
     let Some(provider) = build_wfp_metrics_provider(codex_home, otel)? else {
@@ -99,7 +100,7 @@ fn emit_wfp_setup_metric(
 
 fn emit_wfp_setup_metric_safely<F>(
     codex_home: &Path,
-    otel: Option<&StatsigMetricsSettings>,
+    otel: Option<&WindowsSandboxStatsigMetricsSettings>,
     offline_username: &str,
     metric: &WfpSetupMetric,
     log: &mut F,
@@ -126,13 +127,32 @@ fn emit_wfp_setup_metric_safely<F>(
 pub fn install_wfp_filters<F>(
     codex_home: &Path,
     offline_username: &str,
-    otel: Option<&StatsigMetricsSettings>,
+    otel: Option<&WindowsSandboxStatsigMetricsSettings>,
+    log: F,
+) where
+    F: FnMut(&str),
+{
+    install_wfp_filters_in_namespace(
+        codex_home,
+        offline_username,
+        WindowsSandboxPolicyNamespace::Codex,
+        otel,
+        log,
+    );
+}
+
+#[doc(hidden)]
+pub fn install_wfp_filters_in_namespace<F>(
+    codex_home: &Path,
+    offline_username: &str,
+    namespace: WindowsSandboxPolicyNamespace,
+    otel: Option<&WindowsSandboxStatsigMetricsSettings>,
     mut log: F,
 ) where
     F: FnMut(&str),
 {
     let metric = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        install_wfp_filters_for_account(offline_username)
+        install_wfp_filters_for_account_in_namespace(offline_username, namespace)
     })) {
         Ok(Ok(installed_filter_count)) => {
             log(&format!(

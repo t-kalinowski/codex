@@ -2,6 +2,7 @@ use anyhow::Result;
 use std::io::Write;
 
 use windows::Win32::Foundation::S_OK;
+use windows::Win32::Foundation::ERROR_FILE_NOT_FOUND;
 use windows::Win32::Foundation::VARIANT_TRUE;
 use windows::Win32::NetworkManagement::WindowsFirewall::INetFwPolicy2;
 use windows::Win32::NetworkManagement::WindowsFirewall::INetFwRule3;
@@ -22,16 +23,24 @@ use windows::Win32::System::Com::CoCreateInstance;
 use windows::Win32::System::Com::CoInitializeEx;
 use windows::Win32::System::Com::CoUninitialize;
 use windows::core::BSTR;
+use windows::core::HRESULT;
 use windows::core::Interface;
 
 use codex_windows_sandbox::SetupErrorCode;
 use codex_windows_sandbox::SetupFailure;
+use codex_windows_sandbox::WindowsSandboxPolicyNamespace;
 
 // This is the stable identifier we use to find/update the rule idempotently.
 // It intentionally does not change between installs.
 const OFFLINE_BLOCK_RULE_NAME: &str = "codex_sandbox_offline_block_outbound";
 const OFFLINE_BLOCK_LOOPBACK_TCP_RULE_NAME: &str = "codex_sandbox_offline_block_loopback_tcp";
 const OFFLINE_BLOCK_LOOPBACK_UDP_RULE_NAME: &str = "codex_sandbox_offline_block_loopback_udp";
+const MCP_CONSOLE_OFFLINE_BLOCK_RULE_NAME: &str =
+    "mcp_console_sandbox_offline_block_outbound";
+const MCP_CONSOLE_OFFLINE_BLOCK_LOOPBACK_TCP_RULE_NAME: &str =
+    "mcp_console_sandbox_offline_block_loopback_tcp";
+const MCP_CONSOLE_OFFLINE_BLOCK_LOOPBACK_UDP_RULE_NAME: &str =
+    "mcp_console_sandbox_offline_block_loopback_udp";
 
 // Friendly text shown in the firewall UI.
 const OFFLINE_BLOCK_RULE_FRIENDLY: &str = "Codex Sandbox Offline - Block Non-Loopback Outbound";
@@ -39,8 +48,62 @@ const OFFLINE_BLOCK_LOOPBACK_TCP_RULE_FRIENDLY: &str =
     "Codex Sandbox Offline - Block Loopback TCP (Except Proxy)";
 const OFFLINE_BLOCK_LOOPBACK_UDP_RULE_FRIENDLY: &str = "Codex Sandbox Offline - Block Loopback UDP";
 const OFFLINE_PROXY_ALLOW_RULE_NAME: &str = "codex_sandbox_offline_allow_loopback_proxy";
+const MCP_CONSOLE_OFFLINE_BLOCK_RULE_FRIENDLY: &str =
+    "MCP Console Sandbox Offline - Block Non-Loopback Outbound";
+const MCP_CONSOLE_OFFLINE_BLOCK_LOOPBACK_TCP_RULE_FRIENDLY: &str =
+    "MCP Console Sandbox Offline - Block Loopback TCP (Except Proxy)";
+const MCP_CONSOLE_OFFLINE_BLOCK_LOOPBACK_UDP_RULE_FRIENDLY: &str =
+    "MCP Console Sandbox Offline - Block Loopback UDP";
+const MCP_CONSOLE_OFFLINE_PROXY_ALLOW_RULE_NAME: &str =
+    "mcp_console_sandbox_offline_allow_loopback_proxy";
 const LOOPBACK_REMOTE_ADDRESSES: &str = "127.0.0.0/8,::/127";
 const NON_LOOPBACK_REMOTE_ADDRESSES: &str = "0.0.0.0-126.255.255.255,128.0.0.0-255.255.255.255,::,::2-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff";
+
+#[derive(Clone, Copy)]
+struct FirewallRuleNames {
+    outbound_block: &'static str,
+    loopback_tcp_block: &'static str,
+    loopback_udp_block: &'static str,
+    proxy_allow: &'static str,
+    outbound_block_friendly: &'static str,
+    loopback_tcp_block_friendly: &'static str,
+    loopback_udp_block_friendly: &'static str,
+}
+
+impl FirewallRuleNames {
+    #[cfg(test)]
+    fn all(self) -> [&'static str; 4] {
+        [
+            self.outbound_block,
+            self.loopback_tcp_block,
+            self.loopback_udp_block,
+            self.proxy_allow,
+        ]
+    }
+}
+
+fn firewall_rule_names(namespace: WindowsSandboxPolicyNamespace) -> FirewallRuleNames {
+    match namespace {
+        WindowsSandboxPolicyNamespace::Codex => FirewallRuleNames {
+            outbound_block: OFFLINE_BLOCK_RULE_NAME,
+            loopback_tcp_block: OFFLINE_BLOCK_LOOPBACK_TCP_RULE_NAME,
+            loopback_udp_block: OFFLINE_BLOCK_LOOPBACK_UDP_RULE_NAME,
+            proxy_allow: OFFLINE_PROXY_ALLOW_RULE_NAME,
+            outbound_block_friendly: OFFLINE_BLOCK_RULE_FRIENDLY,
+            loopback_tcp_block_friendly: OFFLINE_BLOCK_LOOPBACK_TCP_RULE_FRIENDLY,
+            loopback_udp_block_friendly: OFFLINE_BLOCK_LOOPBACK_UDP_RULE_FRIENDLY,
+        },
+        WindowsSandboxPolicyNamespace::McpConsole => FirewallRuleNames {
+            outbound_block: MCP_CONSOLE_OFFLINE_BLOCK_RULE_NAME,
+            loopback_tcp_block: MCP_CONSOLE_OFFLINE_BLOCK_LOOPBACK_TCP_RULE_NAME,
+            loopback_udp_block: MCP_CONSOLE_OFFLINE_BLOCK_LOOPBACK_UDP_RULE_NAME,
+            proxy_allow: MCP_CONSOLE_OFFLINE_PROXY_ALLOW_RULE_NAME,
+            outbound_block_friendly: MCP_CONSOLE_OFFLINE_BLOCK_RULE_FRIENDLY,
+            loopback_tcp_block_friendly: MCP_CONSOLE_OFFLINE_BLOCK_LOOPBACK_TCP_RULE_FRIENDLY,
+            loopback_udp_block_friendly: MCP_CONSOLE_OFFLINE_BLOCK_LOOPBACK_UDP_RULE_FRIENDLY,
+        },
+    }
+}
 
 struct BlockRuleSpec<'a> {
     internal_name: &'a str,
@@ -52,12 +115,63 @@ struct BlockRuleSpec<'a> {
     remote_ports: Option<&'a str>,
 }
 
+fn outbound_block_spec<'a>(
+    rule_names: &FirewallRuleNames,
+    local_user_spec: &'a str,
+    offline_sid: &'a str,
+) -> BlockRuleSpec<'a> {
+    BlockRuleSpec {
+        internal_name: rule_names.outbound_block,
+        friendly_desc: rule_names.outbound_block_friendly,
+        protocol: NET_FW_IP_PROTOCOL_ANY.0,
+        local_user_spec,
+        offline_sid,
+        remote_addresses: Some(NON_LOOPBACK_REMOTE_ADDRESSES),
+        remote_ports: None,
+    }
+}
+
+fn loopback_udp_block_spec<'a>(
+    rule_names: &FirewallRuleNames,
+    local_user_spec: &'a str,
+    offline_sid: &'a str,
+) -> BlockRuleSpec<'a> {
+    BlockRuleSpec {
+        internal_name: rule_names.loopback_udp_block,
+        friendly_desc: rule_names.loopback_udp_block_friendly,
+        protocol: NET_FW_IP_PROTOCOL_UDP.0,
+        local_user_spec,
+        offline_sid,
+        remote_addresses: Some(LOOPBACK_REMOTE_ADDRESSES),
+        remote_ports: None,
+    }
+}
+
+fn loopback_tcp_block_spec<'a>(
+    rule_names: &FirewallRuleNames,
+    local_user_spec: &'a str,
+    offline_sid: &'a str,
+    remote_ports: Option<&'a str>,
+) -> BlockRuleSpec<'a> {
+    BlockRuleSpec {
+        internal_name: rule_names.loopback_tcp_block,
+        friendly_desc: rule_names.loopback_tcp_block_friendly,
+        protocol: NET_FW_IP_PROTOCOL_TCP.0,
+        local_user_spec,
+        offline_sid,
+        remote_addresses: Some(LOOPBACK_REMOTE_ADDRESSES),
+        remote_ports,
+    }
+}
+
 pub fn ensure_offline_proxy_allowlist(
+    namespace: WindowsSandboxPolicyNamespace,
     offline_sid: &str,
     proxy_ports: &[u16],
     allow_local_binding: bool,
     log: &mut dyn Write,
 ) -> Result<()> {
+    let rule_names = firewall_rule_names(namespace);
     let local_user_spec = format!("O:LSD:(A;;CC;;;{offline_sid})");
 
     let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
@@ -88,23 +202,15 @@ pub fn ensure_offline_proxy_allowlist(
             if allow_local_binding {
                 // Remove the legacy overlapping allow rule before returning to the local-binding
                 // mode so stale proxy exceptions do not linger.
-                remove_rule_if_present(&rules, OFFLINE_PROXY_ALLOW_RULE_NAME, log)?;
-                remove_rule_if_present(&rules, OFFLINE_BLOCK_LOOPBACK_UDP_RULE_NAME, log)?;
-                remove_rule_if_present(&rules, OFFLINE_BLOCK_LOOPBACK_TCP_RULE_NAME, log)?;
+                remove_rule_if_present(&rules, rule_names.proxy_allow, log)?;
+                remove_rule_if_present(&rules, rule_names.loopback_udp_block, log)?;
+                remove_rule_if_present(&rules, rule_names.loopback_tcp_block, log)?;
                 return Ok(());
             }
 
             ensure_block_rule(
                 &rules,
-                &BlockRuleSpec {
-                    internal_name: OFFLINE_BLOCK_LOOPBACK_UDP_RULE_NAME,
-                    friendly_desc: OFFLINE_BLOCK_LOOPBACK_UDP_RULE_FRIENDLY,
-                    protocol: NET_FW_IP_PROTOCOL_UDP.0,
-                    local_user_spec: &local_user_spec,
-                    offline_sid,
-                    remote_addresses: Some(LOOPBACK_REMOTE_ADDRESSES),
-                    remote_ports: None,
-                },
+                &loopback_udp_block_spec(&rule_names, &local_user_spec, offline_sid),
                 log,
             )?;
 
@@ -112,34 +218,23 @@ pub fn ensure_offline_proxy_allowlist(
             // complement. If the narrowing update fails, the sandbox remains fail-closed.
             ensure_block_rule(
                 &rules,
-                &BlockRuleSpec {
-                    internal_name: OFFLINE_BLOCK_LOOPBACK_TCP_RULE_NAME,
-                    friendly_desc: OFFLINE_BLOCK_LOOPBACK_TCP_RULE_FRIENDLY,
-                    protocol: NET_FW_IP_PROTOCOL_TCP.0,
-                    local_user_spec: &local_user_spec,
-                    offline_sid,
-                    remote_addresses: Some(LOOPBACK_REMOTE_ADDRESSES),
-                    remote_ports: None,
-                },
+                &loopback_tcp_block_spec(&rule_names, &local_user_spec, offline_sid, None),
                 log,
             )?;
 
             // Remove the legacy overlapping allow rule only after the explicit block rules are in
             // place so transitions back to proxy-only mode do not fail open.
-            remove_rule_if_present(&rules, OFFLINE_PROXY_ALLOW_RULE_NAME, log)?;
+            remove_rule_if_present(&rules, rule_names.proxy_allow, log)?;
 
             if let Some(blocked_remote_ports) = blocked_loopback_tcp_remote_ports(proxy_ports) {
                 ensure_block_rule(
                     &rules,
-                    &BlockRuleSpec {
-                        internal_name: OFFLINE_BLOCK_LOOPBACK_TCP_RULE_NAME,
-                        friendly_desc: OFFLINE_BLOCK_LOOPBACK_TCP_RULE_FRIENDLY,
-                        protocol: NET_FW_IP_PROTOCOL_TCP.0,
-                        local_user_spec: &local_user_spec,
+                    &loopback_tcp_block_spec(
+                        &rule_names,
+                        &local_user_spec,
                         offline_sid,
-                        remote_addresses: Some(LOOPBACK_REMOTE_ADDRESSES),
-                        remote_ports: Some(&blocked_remote_ports),
-                    },
+                        Some(&blocked_remote_ports),
+                    ),
                     log,
                 )?;
             }
@@ -153,7 +248,12 @@ pub fn ensure_offline_proxy_allowlist(
     result
 }
 
-pub fn ensure_offline_outbound_block(offline_sid: &str, log: &mut dyn Write) -> Result<()> {
+pub fn ensure_offline_outbound_block(
+    namespace: WindowsSandboxPolicyNamespace,
+    offline_sid: &str,
+    log: &mut dyn Write,
+) -> Result<()> {
+    let rule_names = firewall_rule_names(namespace);
     let local_user_spec = format!("O:LSD:(A;;CC;;;{offline_sid})");
 
     let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
@@ -184,17 +284,76 @@ pub fn ensure_offline_outbound_block(offline_sid: &str, log: &mut dyn Write) -> 
             // Block all outbound IP protocols for this user.
             ensure_block_rule(
                 &rules,
-                &BlockRuleSpec {
-                    internal_name: OFFLINE_BLOCK_RULE_NAME,
-                    friendly_desc: OFFLINE_BLOCK_RULE_FRIENDLY,
-                    protocol: NET_FW_IP_PROTOCOL_ANY.0,
-                    local_user_spec: &local_user_spec,
-                    offline_sid,
-                    remote_addresses: Some(NON_LOOPBACK_REMOTE_ADDRESSES),
-                    remote_ports: None,
-                },
+                &outbound_block_spec(&rule_names, &local_user_spec, offline_sid),
                 log,
             )?;
+            Ok(())
+        })()
+    };
+
+    unsafe {
+        CoUninitialize();
+    }
+    result
+}
+
+pub fn verify_offline_sandbox_network(
+    namespace: WindowsSandboxPolicyNamespace,
+    offline_sid: &str,
+    proxy_ports: &[u16],
+    allow_local_binding: bool,
+) -> Result<()> {
+    let rule_names = firewall_rule_names(namespace);
+    let local_user_spec = format!("O:LSD:(A;;CC;;;{offline_sid})");
+    let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+    if hr.is_err() {
+        return Err(anyhow::Error::new(SetupFailure::new(
+            SetupErrorCode::HelperFirewallComInitFailed,
+            format!("CoInitializeEx failed: {hr:?}"),
+        )));
+    }
+
+    let result = unsafe {
+        (|| -> Result<()> {
+            let policy: INetFwPolicy2 = CoCreateInstance(&NetFwPolicy2, None, CLSCTX_INPROC_SERVER)
+                .map_err(|err| {
+                    anyhow::Error::new(SetupFailure::new(
+                        SetupErrorCode::HelperFirewallPolicyAccessFailed,
+                        format!("CoCreateInstance NetFwPolicy2 failed: {err:?}"),
+                    ))
+                })?;
+            ensure_local_policy_rules_take_effect(&policy)?;
+            let rules = policy.Rules().map_err(|err| {
+                anyhow::Error::new(SetupFailure::new(
+                    SetupErrorCode::HelperFirewallPolicyAccessFailed,
+                    format!("INetFwPolicy2::Rules failed: {err:?}"),
+                ))
+            })?;
+
+            verify_block_rule(
+                &rules,
+                &outbound_block_spec(&rule_names, &local_user_spec, offline_sid),
+            )?;
+            verify_rule_absent(&rules, rule_names.proxy_allow)?;
+            if allow_local_binding {
+                verify_rule_absent(&rules, rule_names.loopback_udp_block)?;
+                verify_rule_absent(&rules, rule_names.loopback_tcp_block)?;
+            } else {
+                verify_block_rule(
+                    &rules,
+                    &loopback_udp_block_spec(&rule_names, &local_user_spec, offline_sid),
+                )?;
+                let blocked_remote_ports = blocked_loopback_tcp_remote_ports(proxy_ports);
+                verify_block_rule(
+                    &rules,
+                    &loopback_tcp_block_spec(
+                        &rule_names,
+                        &local_user_spec,
+                        offline_sid,
+                        blocked_remote_ports.as_deref(),
+                    ),
+                )?;
+            }
             Ok(())
         })()
     };
@@ -326,6 +485,95 @@ fn ensure_block_rule(
     Ok(())
 }
 
+fn verify_rule_absent(rules: &INetFwRules, internal_name: &str) -> Result<()> {
+    let name = BSTR::from(internal_name);
+    match unsafe { rules.Item(&name) } {
+        Ok(_) => Err(firewall_verification_error(format!(
+            "unexpected stale firewall rule is present: {internal_name}"
+        ))),
+        Err(error) if error.code() == HRESULT::from_win32(ERROR_FILE_NOT_FOUND.0) => Ok(()),
+        Err(error) => Err(firewall_verification_error(format!(
+            "inspect absent firewall rule {internal_name}: {error:?}"
+        ))),
+    }
+}
+
+fn verify_block_rule(rules: &INetFwRules, spec: &BlockRuleSpec<'_>) -> Result<()> {
+    let name = BSTR::from(spec.internal_name);
+    let rule: INetFwRule3 = unsafe { rules.Item(&name) }
+        .map_err(|error| {
+            firewall_verification_error(format!(
+                "required firewall rule {} is unavailable: {error:?}",
+                spec.internal_name
+            ))
+        })?
+        .cast()
+        .map_err(|error| {
+            firewall_verification_error(format!(
+                "cast firewall rule {} to INetFwRule3: {error:?}",
+                spec.internal_name
+            ))
+        })?;
+    let actual_description = unsafe { rule.Description() }
+        .map_err(|error| rule_read_error(spec, "Description", error))?
+        .to_string();
+    let actual_direction =
+        unsafe { rule.Direction() }.map_err(|error| rule_read_error(spec, "Direction", error))?;
+    let actual_action =
+        unsafe { rule.Action() }.map_err(|error| rule_read_error(spec, "Action", error))?;
+    let actual_enabled =
+        unsafe { rule.Enabled() }.map_err(|error| rule_read_error(spec, "Enabled", error))?;
+    let actual_profiles =
+        unsafe { rule.Profiles() }.map_err(|error| rule_read_error(spec, "Profiles", error))?;
+    let actual_protocol =
+        unsafe { rule.Protocol() }.map_err(|error| rule_read_error(spec, "Protocol", error))?;
+    let actual_remote_addresses = unsafe { rule.RemoteAddresses() }
+        .map_err(|error| rule_read_error(spec, "RemoteAddresses", error))?
+        .to_string();
+    let actual_remote_ports = unsafe { rule.RemotePorts() }
+        .map_err(|error| rule_read_error(spec, "RemotePorts", error))?
+        .to_string();
+    let actual_user_scope = unsafe { rule.LocalUserAuthorizedList() }
+        .map_err(|error| rule_read_error(spec, "LocalUserAuthorizedList", error))?
+        .to_string();
+    let expected_remote_addresses = spec.remote_addresses.unwrap_or("*");
+    let expected_remote_ports = spec.remote_ports.unwrap_or("*");
+    let matches = actual_description == spec.friendly_desc
+        && actual_direction == NET_FW_RULE_DIR_OUT
+        && actual_action == NET_FW_ACTION_BLOCK
+        && actual_enabled == VARIANT_TRUE
+        && actual_profiles == NET_FW_PROFILE2_ALL.0
+        && actual_protocol == spec.protocol
+        && actual_remote_addresses == expected_remote_addresses
+        && actual_remote_ports == expected_remote_ports
+        && actual_user_scope == spec.local_user_spec;
+    if !matches {
+        return Err(firewall_verification_error(format!(
+            "firewall rule {} differs from the requested policy: description={actual_description:?}, direction={actual_direction:?}, action={actual_action:?}, enabled={actual_enabled:?}, profiles={actual_profiles}, protocol={actual_protocol}, remote_addresses={actual_remote_addresses:?}, remote_ports={actual_remote_ports:?}, user_scope={actual_user_scope:?}",
+            spec.internal_name
+        )));
+    }
+    Ok(())
+}
+
+fn rule_read_error(
+    spec: &BlockRuleSpec<'_>,
+    property: &str,
+    error: windows::core::Error,
+) -> anyhow::Error {
+    firewall_verification_error(format!(
+        "read firewall rule {} property {property}: {error:?}",
+        spec.internal_name
+    ))
+}
+
+fn firewall_verification_error(message: String) -> anyhow::Error {
+    anyhow::Error::new(SetupFailure::new(
+        SetupErrorCode::HelperFirewallRuleVerifyFailed,
+        message,
+    ))
+}
+
 fn configure_rule(rule: &INetFwRule3, spec: &BlockRuleSpec<'_>) -> Result<()> {
     unsafe {
         rule.SetDescription(&BSTR::from(spec.friendly_desc))
@@ -405,7 +653,8 @@ fn configure_rule_network_scope(rule: &INetFwRule3, spec: &BlockRuleSpec<'_>) ->
                     format!("SetRemoteAddresses failed: {err:?}"),
                 ))
             })?;
-        if let Some(remote_ports) = spec.remote_ports {
+        if spec.protocol == NET_FW_IP_PROTOCOL_TCP.0 || spec.protocol == NET_FW_IP_PROTOCOL_UDP.0 {
+            let remote_ports = spec.remote_ports.unwrap_or("*");
             rule.SetRemotePorts(&BSTR::from(remote_ports))
                 .map_err(|err| {
                     anyhow::Error::new(SetupFailure::new(
@@ -468,11 +717,27 @@ fn log_line(log: &mut dyn Write, msg: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use codex_windows_sandbox::WindowsSandboxPolicyNamespace;
     use pretty_assertions::assert_eq;
+    use std::collections::BTreeSet;
     use windows::Win32::Foundation::S_FALSE;
     use windows::Win32::NetworkManagement::WindowsFirewall::NET_FW_MODIFY_STATE_GP_OVERRIDE;
 
     use super::*;
+
+    #[test]
+    fn policy_namespace_rule_names_are_disjoint() {
+        let codex = firewall_rule_names(WindowsSandboxPolicyNamespace::Codex)
+            .all()
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+        let mcp_console = firewall_rule_names(WindowsSandboxPolicyNamespace::McpConsole)
+            .all()
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+
+        assert!(codex.is_disjoint(&mcp_console));
+    }
 
     #[test]
     fn configured_remote_address_literals_are_accepted_by_firewall_com() {

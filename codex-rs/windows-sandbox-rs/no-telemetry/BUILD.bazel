@@ -1,0 +1,54 @@
+load("@crates//:defs.bzl", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_binary")
+load("//:defs.bzl", "WINDOWS_RUSTC_LINK_FLAGS")
+
+SETUP_MANIFEST_RUSTC_FLAGS = select({
+    "@llvm//constraints/windows/abi:gnullvm": [
+        "-C",
+        "link-arg=$(location //codex-rs/windows-sandbox-rs:codex-windows-sandbox-setup-manifest-resource)",
+    ],
+    "@llvm//constraints/windows/abi:msvc": [
+        "-C",
+        "link-arg=/MANIFEST:EMBED",
+        "-C",
+        "link-arg=/MANIFESTINPUT:$(location //codex-rs/windows-sandbox-rs:codex-windows-sandbox-setup.manifest)",
+    ],
+    "//conditions:default": [],
+})
+
+SETUP_MANIFEST_DATA = select({
+    "@llvm//constraints/windows/abi:gnullvm": ["//codex-rs/windows-sandbox-rs:codex-windows-sandbox-setup-manifest-resource"],
+    "@llvm//constraints/windows/abi:msvc": ["//codex-rs/windows-sandbox-rs:codex-windows-sandbox-setup.manifest"],
+    "//conditions:default": [],
+})
+
+HELPER_DEPS = all_crate_deps(
+    package_name = "codex-rs/windows-sandbox-rs",
+    cargo_only = True,
+) + [
+    "//codex-rs/utils/pty",
+    "//codex-rs/windows-sandbox-rs:windows-sandbox-rs-no-telemetry",
+]
+
+rust_binary(
+    name = "codex-command-runner",
+    srcs = ["//codex-rs/windows-sandbox-rs:no-telemetry-helper-srcs"],
+    crate_name = "codex_command_runner",
+    crate_root = "//codex-rs/windows-sandbox-rs:src/bin/command_runner/main.rs",
+    edition = "2024",
+    rustc_flags = WINDOWS_RUSTC_LINK_FLAGS,
+    visibility = ["//codex-rs/mcp-console-sandbox:__pkg__"],
+    deps = HELPER_DEPS,
+)
+
+rust_binary(
+    name = "codex-windows-sandbox-setup",
+    srcs = ["//codex-rs/windows-sandbox-rs:no-telemetry-helper-srcs"],
+    compile_data = SETUP_MANIFEST_DATA,
+    crate_name = "codex_windows_sandbox_setup",
+    crate_root = "//codex-rs/windows-sandbox-rs:src/bin/setup_main/main.rs",
+    edition = "2024",
+    rustc_flags = WINDOWS_RUSTC_LINK_FLAGS + SETUP_MANIFEST_RUSTC_FLAGS,
+    visibility = ["//codex-rs/mcp-console-sandbox:__pkg__"],
+    deps = HELPER_DEPS,
+)

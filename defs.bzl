@@ -190,6 +190,7 @@ def codex_rust_crate(
         proc_macro = False,
         build_script_enabled = True,
         build_script_data = [],
+        build_script_env = {},
         compile_data = [],
         binary_compile_data_extra = {},
         lib_data_extra = [],
@@ -208,6 +209,8 @@ def codex_rust_crate(
         test_tags = [],
         test_threads = 0,
         unit_test_timeout = None,
+        deps_override = None,
+        test_deps_override = None,
         extra_binaries = [],
         extra_binaries_non_windows = [],
         run_tests_with_wine_exec = False):
@@ -232,6 +235,8 @@ def codex_rust_crate(
             You probably don't want this, it's only here for a single caller.
         proc_macro: Whether this crate builds a proc-macro library.
         build_script_data: Data files exposed to the build script at runtime.
+        build_script_env: Environment variables supplied only while running the
+            build script.
         compile_data: Non-Rust compile-time data for the library target.
         binary_compile_data_extra: Mapping from binary names to extra non-Rust
             compile-time data for those binary targets.
@@ -261,6 +266,11 @@ def codex_rust_crate(
         test_threads: Optional Rust test thread limit for sharded integration tests.
         unit_test_timeout: Optional Bazel timeout for the unit-test target
             generated from `src/**/*.rs`.
+        deps_override: Complete normal dependency list for this crate. Prefer
+            the generated dependency list unless a private build variant must
+            replace a generated local-crate edge.
+        test_deps_override: Complete normal and development dependency list for
+            tests when deps_override is used.
         extra_binaries: Additional binary labels to surface as test data and
             `CARGO_BIN_EXE_*` environment variables. These are only needed for binaries from a different crate.
         extra_binaries_non_windows: Like `extra_binaries`, but omitted from
@@ -277,6 +287,12 @@ def codex_rust_crate(
         "INSTA_WORKSPACE_ROOT": ".",
         "INSTA_SNAPSHOT_PATH": "src",
     }
+
+    normal_deps = all_crate_deps() if deps_override == None else deps_override
+    test_deps = (
+        all_crate_deps(normal = True, normal_dev = True) if test_deps_override == None else test_deps_override
+    )
+    binary_test_deps = all_crate_deps(normal_dev = True) if test_deps_override == None else test_deps_override
 
     native.filegroup(
         name = "package-files",
@@ -313,6 +329,7 @@ def codex_rust_crate(
             srcs = ["build.rs"],
             deps = all_crate_deps(build = True),
             data = build_script_data,
+            build_script_env = build_script_env,
             # Some build script deps sniff version-related env vars...
             version = "0.0.0",
         )
@@ -325,7 +342,7 @@ def codex_rust_crate(
             name = name,
             crate_name = crate_name,
             crate_features = crate_features,
-            deps = all_crate_deps() + maybe_deps + deps_extra,
+            deps = normal_deps + maybe_deps + deps_extra,
             compile_data = compile_data,
             data = lib_data_extra,
             srcs = lib_srcs,
@@ -347,7 +364,7 @@ def codex_rust_crate(
             name = unit_test_binary,
             crate = name,
             crate_features = crate_features,
-            deps = all_crate_deps(normal = True, normal_dev = True) + maybe_deps + deps_extra,
+            deps = test_deps + maybe_deps + deps_extra,
             # Unit tests also compile to standalone Windows executables, so
             # keep their stack reserve aligned with binaries and integration
             # tests under gnullvm.
@@ -396,7 +413,7 @@ def codex_rust_crate(
             name = binary,
             crate_name = binary.replace("-", "_"),
             crate_root = main,
-            deps = all_crate_deps() + maybe_deps + deps_extra,
+            deps = normal_deps + maybe_deps + deps_extra,
             edition = crate_edition,
             # Keep per-binary Cargo link behavior scoped to the matching
             # generated rust_binary instead of leaking it to sibling binaries.
@@ -420,7 +437,7 @@ def codex_rust_crate(
             name = binary_unit_test_binary,
             crate = ":" + binary,
             crate_features = crate_features,
-            deps = all_crate_deps(normal_dev = True),
+            deps = binary_test_deps,
             rustc_flags = rustc_flags_extra + WINDOWS_RUSTC_LINK_FLAGS + [
                 "--remap-path-prefix=../codex-rs=",
                 "--remap-path-prefix=codex-rs=",
@@ -547,7 +564,7 @@ def codex_rust_crate(
                 srcs = [test],
                 data = native.glob(["tests/**"], allow_empty = True) + integration_test_binaries + integration_test_data_extra,
                 compile_data = native.glob(["tests/**"], allow_empty = True) + integration_compile_data_extra,
-                deps = all_crate_deps(normal = True, normal_dev = True) + maybe_deps + deps_extra,
+                deps = test_deps + maybe_deps + deps_extra,
                 # Bazel has emitted both `codex-rs/<crate>/...` and
                 # `../codex-rs/<crate>/...` paths for `file!()`. Strip either
                 # prefix so Insta records Cargo-like metadata such as `core/tests/...`.
@@ -587,7 +604,7 @@ def codex_rust_crate(
                 srcs = [test],
                 data = native.glob(["tests/**"], allow_empty = True) + integration_test_binaries + integration_test_data_extra,
                 compile_data = native.glob(["tests/**"], allow_empty = True) + integration_compile_data_extra,
-                deps = all_crate_deps(normal = True, normal_dev = True) + maybe_deps + deps_extra,
+                deps = test_deps + maybe_deps + deps_extra,
                 # Bazel has emitted both `codex-rs/<crate>/...` and
                 # `../codex-rs/<crate>/...` paths for `file!()`. Strip either
                 # prefix so Insta records Cargo-like metadata such as `core/tests/...`.
@@ -662,7 +679,7 @@ def codex_rust_crate(
             srcs = [test],
             data = native.glob(["tests/**"], allow_empty = True) + integration_test_binaries + integration_test_data_extra,
             compile_data = native.glob(["tests/**"], allow_empty = True) + integration_compile_data_extra,
-            deps = all_crate_deps(normal = True, normal_dev = True) + maybe_deps + deps_extra,
+            deps = test_deps + maybe_deps + deps_extra,
             rustc_flags = rustc_flags_extra + WINDOWS_RUSTC_LINK_FLAGS + [
                 "--remap-path-prefix=../codex-rs=",
                 "--remap-path-prefix=codex-rs=",

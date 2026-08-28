@@ -1,5 +1,7 @@
 use std::ffi::CStr;
 use std::ffi::CString;
+use std::ffi::OsStr;
+use std::ffi::OsString;
 use std::fs::File;
 use std::os::raw::c_char;
 use std::os::unix::ffi::OsStrExt;
@@ -9,6 +11,7 @@ use std::sync::OnceLock;
 
 use crate::bundled_bwrap;
 use crate::bundled_bwrap::BundledBwrapLauncher;
+use crate::bundled_bwrap::ExecVerification;
 use crate::exec_util::argv_to_cstrings;
 use crate::exec_util::make_files_inheritable;
 use codex_sandboxing::find_system_bwrap_in_path;
@@ -18,6 +21,7 @@ use codex_utils_absolute_path::AbsolutePathBuf;
 enum BubblewrapLauncher {
     System(SystemBwrapLauncher),
     Bundled(BundledBwrapLauncher),
+    Embedding(BundledBwrapLauncher),
     Unavailable,
 }
 
@@ -35,10 +39,30 @@ struct SystemBwrapCapabilities {
     supports_ro_bind_fd: bool,
 }
 
-pub(crate) fn exec_bwrap(mut argv: Vec<String>, preserved_files: Vec<File>) -> ! {
-    argv.insert(1, "--as-pid-1".to_string());
+const CLOSE_MONITOR_STANDARD_STREAMS_ARG: &str = "--codex-close-monitor-standard-streams";
 
-    match preferred_bwrap_launcher() {
+#[derive(Clone, Copy)]
+enum MonitorStandardStreams {
+    Preserve,
+    Release,
+}
+
+pub(crate) fn exec_bwrap(mut argv: Vec<OsString>, preserved_files: Vec<File>) -> ! {
+    let launcher = preferred_bwrap_launcher();
+    let monitor_standard_streams = if crate::embedding::command_as_pid_1() {
+        if !matches!(
+            &launcher,
+            BubblewrapLauncher::Bundled(_) | BubblewrapLauncher::Embedding(_)
+        ) {
+            panic!("PID 1 embedding requires packaged bubblewrap")
+        }
+        MonitorStandardStreams::Release
+    } else {
+        MonitorStandardStreams::Preserve
+    };
+    apply_process_options(&mut argv, monitor_standard_streams);
+
+    match launcher {
         BubblewrapLauncher::System(launcher) => {
             if !launcher.supports_ro_bind_fd {
                 translate_legacy_bwrap_fd_mounts(&mut argv)
@@ -46,7 +70,14 @@ pub(crate) fn exec_bwrap(mut argv: Vec<String>, preserved_files: Vec<File>) -> !
             }
             exec_system_bwrap(&launcher.program, argv, preserved_files)
         }
-        BubblewrapLauncher::Bundled(launcher) => launcher.exec(argv, preserved_files),
+        BubblewrapLauncher::Bundled(launcher) => {
+            launcher.exec(ExecVerification::DigestOnly, argv, preserved_files)
+        }
+        BubblewrapLauncher::Embedding(launcher) => launcher.exec(
+            ExecVerification::DigestAndPrivateCompatibility,
+            argv,
+            preserved_files,
+        ),
         BubblewrapLauncher::Unavailable => {
             panic!(
                 "bubblewrap is unavailable: no system bwrap was found on PATH and no bundled \
@@ -56,7 +87,17 @@ pub(crate) fn exec_bwrap(mut argv: Vec<String>, preserved_files: Vec<File>) -> !
     }
 }
 
-fn translate_legacy_bwrap_fd_mounts(argv: &mut Vec<String>) -> Result<(), String> {
+fn apply_process_options(
+    argv: &mut Vec<OsString>,
+    monitor_standard_streams: MonitorStandardStreams,
+) {
+    argv.insert(1, OsString::from("--as-pid-1"));
+    if matches!(monitor_standard_streams, MonitorStandardStreams::Release) {
+        argv.insert(2, OsString::from(CLOSE_MONITOR_STANDARD_STREAMS_ARG));
+    }
+}
+
+fn translate_legacy_bwrap_fd_mounts(argv: &mut Vec<OsString>) -> Result<(), String> {
     let command_separator = argv
         .iter()
         .position(|argument| argument == "--")
@@ -76,8 +117,14 @@ fn translate_legacy_bwrap_fd_mounts(argv: &mut Vec<String>) -> Result<(), String
             .filter(|_| argument_index + 1 < command_separator)
             .ok_or_else(|| "--ro-bind-fd is missing its file descriptor".to_string())?;
         let fd = fd_argument
-            .parse::<libc::c_int>()
-            .map_err(|_| format!("invalid --ro-bind-fd file descriptor: {fd_argument}"))?;
+            .to_str()
+            .and_then(|argument| argument.parse::<libc::c_int>().ok())
+            .ok_or_else(|| {
+                format!(
+                    "invalid --ro-bind-fd file descriptor: {}",
+                    fd_argument.to_string_lossy()
+                )
+            })?;
         if fd <= libc::STDERR_FILENO {
             return Err(format!(
                 "--ro-bind-fd file descriptor must not use standard descriptors: {fd}"
@@ -93,15 +140,19 @@ fn translate_legacy_bwrap_fd_mounts(argv: &mut Vec<String>) -> Result<(), String
             .ok_or_else(|| "--ro-bind-fd is missing its mount destination".to_string())?;
         if !Path::new(destination).is_absolute() {
             return Err(format!(
-                "--ro-bind-fd mount destination must be absolute: {destination}"
+                "--ro-bind-fd mount destination must be absolute: {}",
+                destination.to_string_lossy()
             ));
         }
 
-        verification_args.push("--verify-fd-mount".to_string());
-        verification_args.push(format!("{fd}:{destination}"));
+        verification_args.push(OsString::from("--verify-fd-mount"));
+        verification_args.push(OsString::from(format!(
+            "{fd}:{}",
+            destination.to_string_lossy()
+        )));
         verified_fds.push(fd);
-        argv[argument_index] = "--ro-bind".to_string();
-        argv[argument_index + 1] = format!("/proc/self/fd/{fd}");
+        argv[argument_index] = OsString::from("--ro-bind");
+        argv[argument_index + 1] = OsString::from(format!("/proc/self/fd/{fd}"));
         argument_index += 3;
     }
 
@@ -114,7 +165,7 @@ fn translate_legacy_bwrap_fd_mounts(argv: &mut Vec<String>) -> Result<(), String
     }
     if !argv[inner_command + 1..]
         .iter()
-        .take_while(|argument| argument.as_str() != "--")
+        .take_while(|argument| argument.as_os_str() != OsStr::new("--"))
         .any(|argument| argument == "--apply-seccomp-then-exec")
     {
         return Err("descriptor-backed mounts require the trusted inner sandbox stage".to_string());
@@ -124,6 +175,10 @@ fn translate_legacy_bwrap_fd_mounts(argv: &mut Vec<String>) -> Result<(), String
 }
 
 fn preferred_bwrap_launcher() -> BubblewrapLauncher {
+    if let Some(launcher) = crate::embedding::selected_bwrap_launcher() {
+        return BubblewrapLauncher::Embedding(launcher);
+    }
+
     static LAUNCHER: OnceLock<BubblewrapLauncher> = OnceLock::new();
     LAUNCHER
         .get_or_init(|| {
@@ -178,7 +233,9 @@ fn system_bwrap_launcher_for_path_with_probe(
 pub(crate) fn preferred_bwrap_supports_argv0() -> bool {
     match preferred_bwrap_launcher() {
         BubblewrapLauncher::System(launcher) => launcher.supports_argv0,
-        BubblewrapLauncher::Bundled(_) | BubblewrapLauncher::Unavailable => true,
+        BubblewrapLauncher::Bundled(_)
+        | BubblewrapLauncher::Embedding(_)
+        | BubblewrapLauncher::Unavailable => true,
     }
 }
 
@@ -206,7 +263,7 @@ fn system_bwrap_capabilities(system_bwrap_path: &Path) -> Option<SystemBwrapCapa
 
 fn exec_system_bwrap(
     program: &AbsolutePathBuf,
-    argv: Vec<String>,
+    argv: Vec<OsString>,
     preserved_files: Vec<File>,
 ) -> ! {
     // System bwrap runs across an exec boundary, so preserved fds must survive exec.
@@ -238,6 +295,39 @@ mod tests {
     use pretty_assertions::assert_eq;
     use std::os::unix::fs::PermissionsExt;
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn default_process_options_preserve_monitor_standard_streams() {
+        let mut argv = vec![OsString::from("bwrap"), OsString::from("--")];
+
+        apply_process_options(&mut argv, MonitorStandardStreams::Preserve);
+
+        assert_eq!(
+            argv,
+            vec![
+                OsString::from("bwrap"),
+                OsString::from("--as-pid-1"),
+                OsString::from("--"),
+            ]
+        );
+    }
+
+    #[test]
+    fn embedding_process_options_release_monitor_standard_streams() {
+        let mut argv = vec![OsString::from("bwrap"), OsString::from("--")];
+
+        apply_process_options(&mut argv, MonitorStandardStreams::Release);
+
+        assert_eq!(
+            argv,
+            vec![
+                OsString::from("bwrap"),
+                OsString::from("--as-pid-1"),
+                OsString::from(CLOSE_MONITOR_STANDARD_STREAMS_ARG),
+                OsString::from("--"),
+            ]
+        );
+    }
 
     #[test]
     fn prefers_system_bwrap_when_help_lists_argv0() {
@@ -333,7 +423,10 @@ mod tests {
             "--".to_string(),
             "echo".to_string(),
             "--ro-bind-fd".to_string(),
-        ];
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect();
 
         translate_legacy_bwrap_fd_mounts(&mut argv).expect("fd mount should translate");
 
@@ -353,6 +446,9 @@ mod tests {
                 "echo".to_string(),
                 "--ro-bind-fd".to_string(),
             ]
+            .into_iter()
+            .map(OsString::from)
+            .collect::<Vec<_>>()
         );
     }
 
@@ -371,7 +467,10 @@ mod tests {
             "--apply-seccomp-then-exec".to_string(),
             "--".to_string(),
             "true".to_string(),
-        ];
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect();
 
         translate_legacy_bwrap_fd_mounts(&mut argv).expect("fd mounts should translate");
 
@@ -395,6 +494,9 @@ mod tests {
                 "--".to_string(),
                 "true".to_string(),
             ]
+            .into_iter()
+            .map(OsString::from)
+            .collect::<Vec<_>>()
         );
     }
 
@@ -412,7 +514,10 @@ mod tests {
                 destination.to_string(),
                 "--".to_string(),
                 "codex-linux-sandbox".to_string(),
-            ];
+            ]
+            .into_iter()
+            .map(OsString::from)
+            .collect();
 
             assert!(translate_legacy_bwrap_fd_mounts(&mut argv).is_err());
         }
@@ -429,7 +534,10 @@ mod tests {
             "/bin/true".to_string(),
             "--".to_string(),
             "--apply-seccomp-then-exec".to_string(),
-        ];
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect();
 
         assert!(translate_legacy_bwrap_fd_mounts(&mut argv).is_err());
     }
@@ -446,7 +554,10 @@ mod tests {
             "/tmp/second".to_string(),
             "--".to_string(),
             "codex-linux-sandbox".to_string(),
-        ];
+        ]
+        .into_iter()
+        .map(OsString::from)
+        .collect();
 
         assert!(translate_legacy_bwrap_fd_mounts(&mut argv).is_err());
     }

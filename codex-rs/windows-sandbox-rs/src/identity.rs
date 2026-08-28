@@ -1,5 +1,6 @@
 use crate::dpapi;
 use crate::logging::debug_log;
+use crate::policy_namespace::WindowsSandboxPolicyNamespace;
 use crate::resolved_permissions::ResolvedWindowsSandboxPermissions;
 use crate::setup::SandboxNetworkIdentity;
 use crate::setup::SandboxUserRecord;
@@ -47,7 +48,7 @@ pub fn sandbox_setup_is_complete(codex_home: &Path) -> bool {
     matches!(load_users(codex_home), Ok(Some(users)) if users.version_matches())
 }
 
-fn load_marker(codex_home: &Path) -> Result<Option<SetupMarker>> {
+pub(crate) fn load_marker(codex_home: &Path) -> Result<Option<SetupMarker>> {
     let path = setup_marker_path(codex_home);
     let marker = match fs::read_to_string(&path) {
         Ok(contents) => match serde_json::from_str::<SetupMarker>(&contents) {
@@ -97,6 +98,16 @@ fn load_users(codex_home: &Path) -> Result<Option<SandboxUsersFile>> {
     }
 }
 
+pub(crate) fn prepared_sandbox_users_match_policy_namespace(
+    codex_home: &Path,
+    namespace: WindowsSandboxPolicyNamespace,
+) -> Result<bool> {
+    Ok(matches!(
+        load_users(codex_home)?,
+        Some(users) if users.version_matches() && users.identities_match(namespace)
+    ))
+}
+
 fn remove_sandbox_users_file(codex_home: &Path, reason: &str) -> Result<()> {
     let path = sandbox_users_path(codex_home);
     debug_log(
@@ -140,6 +151,18 @@ fn select_identity(
         username: chosen.username,
         password,
     }))
+}
+
+pub(crate) fn load_prepared_sandbox_creds(
+    network_identity: SandboxNetworkIdentity,
+    codex_home: &Path,
+) -> Result<Option<SandboxCreds>> {
+    select_identity(network_identity, codex_home).map(|identity| {
+        identity.map(|identity| SandboxCreds {
+            username: identity.username,
+            password: identity.password,
+        })
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -342,6 +365,7 @@ mod tests {
             version: crate::setup::SETUP_VERSION,
             offline_username: "offline".to_string(),
             online_username: "online".to_string(),
+            policy_namespace: crate::policy_namespace::WindowsSandboxPolicyNamespace::Codex,
             created_at: None,
             proxy_ports: vec![7890],
             allow_local_binding: true,
@@ -378,6 +402,7 @@ mod tests {
             version: crate::setup::SETUP_VERSION,
             offline_username: "offline".to_string(),
             online_username: "online".to_string(),
+            policy_namespace: crate::policy_namespace::WindowsSandboxPolicyNamespace::Codex,
             created_at: None,
             proxy_ports: vec![3128, 8081],
             allow_local_binding: true,
