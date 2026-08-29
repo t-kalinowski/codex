@@ -294,6 +294,14 @@ impl SandboxManager {
         }
     }
 
+    /// Creates a manager with MCP Console's release-local macOS compatibility profile.
+    pub fn for_mcp_console() -> Self {
+        Self {
+            #[cfg(target_os = "macos")]
+            seatbelt_profile: MacosSeatbeltProfile::McpConsole,
+        }
+    }
+
     pub fn select_initial(
         &self,
         permission_profile: &PermissionProfile,

@@ -28,6 +28,13 @@ mod proxy_routing;
 #[cfg(target_os = "linux")]
 pub const BUNDLED_BWRAP_DIGEST_VERIFICATION_FAILURE_EXIT_CODE: i32 = 8;
 
+/// Verifies the exact private bubblewrap companion required by
+/// `mcp-console-sandbox` against the digest embedded at build time.
+#[cfg(target_os = "linux")]
+pub fn verify_mcp_console_bundled_bwrap() -> Result<(), String> {
+    bundled_bwrap::verify_mcp_console_companion()
+}
+
 #[cfg(target_os = "linux")]
 pub fn run_main() -> ! {
     linux_run_main::run_main();

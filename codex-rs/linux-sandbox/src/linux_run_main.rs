@@ -40,6 +40,7 @@ use codex_sandboxing::landlock::CODEX_LINUX_SANDBOX_ARG0;
 
 static BWRAP_CHILD_PID: AtomicI32 = AtomicI32::new(0);
 static PENDING_FORWARDED_SIGNAL: AtomicI32 = AtomicI32::new(0);
+static SYNTHETIC_MOUNT_REGISTRY_ROOT: OnceLock<PathBuf> = OnceLock::new();
 
 const FORWARDED_SIGNALS: &[libc::c_int] =
     &[libc::SIGHUP, libc::SIGINT, libc::SIGQUIT, libc::SIGTERM];
@@ -144,6 +145,18 @@ pub struct LandlockCommand {
     #[arg(long = "no-proc", default_value_t = false)]
     pub no_proc: bool,
 
+    /// Private embedding override for synthetic-mount bookkeeping.
+    #[arg(long = "mcp-console-state-root", hide = true)]
+    pub mcp_console_state_root: Option<PathBuf>,
+
+    /// Private embedding requirement for the exact adjacent bubblewrap companion.
+    #[arg(
+        long = "mcp-console-bundled-bwrap",
+        hide = true,
+        default_value_t = false
+    )]
+    pub mcp_console_bundled_bwrap: bool,
+
     /// Full command args to run under the Linux sandbox helper.
     #[arg(trailing_var_arg = true)]
     pub command: Vec<String>,
@@ -167,8 +180,23 @@ pub fn run_main() -> ! {
         proxy_route_spec,
         verify_fd_mounts,
         no_proc,
+        mcp_console_state_root,
+        mcp_console_bundled_bwrap,
         command,
     } = LandlockCommand::parse();
+
+    if let Some(root) = mcp_console_state_root {
+        assert!(
+            root.is_absolute(),
+            "MCP Console synthetic mount state root must be absolute"
+        );
+        SYNTHETIC_MOUNT_REGISTRY_ROOT
+            .set(root)
+            .unwrap_or_else(|_| panic!("MCP Console synthetic mount state root was set twice"));
+    }
+    if mcp_console_bundled_bwrap {
+        crate::launcher::require_mcp_console_bundled_bwrap();
+    }
 
     if command.is_empty() {
         panic!("No command specified to execute.");
@@ -1334,9 +1362,7 @@ fn synthetic_mount_marker_dir(path: &Path) -> PathBuf {
 }
 
 pub(crate) fn synthetic_mount_registry_root() -> PathBuf {
-    static REGISTRY_ROOT: OnceLock<PathBuf> = OnceLock::new();
-
-    REGISTRY_ROOT
+    SYNTHETIC_MOUNT_REGISTRY_ROOT
         .get_or_init(|| {
             let effective_uid = unsafe { libc::geteuid() };
             let temp_dir = std::env::temp_dir();

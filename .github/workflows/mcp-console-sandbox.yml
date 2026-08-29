@@ -1,0 +1,164 @@
+name: MCP Console sandbox runner
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "mcp-console/sandbox-runner/**"
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    name: Contract (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            runner: ubuntu-24.04
+          - name: macOS
+            runner: macos-14
+          - name: Windows compile
+            runner: windows-2022
+    defaults:
+      run:
+        working-directory: codex-rs
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-ci
+
+      - name: Install Linux sandbox build dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            --no-install-recommends build-essential pkg-config libcap-dev bubblewrap
+
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          components: clippy,rustfmt
+
+      - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
+        with:
+          tool: nextest@0.9.103
+
+      - name: Build Linux companion
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked -p codex-bwrap --bin bwrap
+          digest="$(sha256sum "${CARGO_TARGET_DIR}/debug/bwrap" | cut -d ' ' -f 1)"
+          echo "CODEX_BWRAP_SHA256=${digest}" >> "${GITHUB_ENV}"
+
+      - name: Run executable contract tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${RUNNER_OS}" == "Linux" ]]; then
+            env \
+              "CARGO_BIN_EXE_bwrap=${CARGO_TARGET_DIR}/debug/bwrap" \
+              just test -p codex-mcp-console-sandbox
+          else
+            just test -p codex-mcp-console-sandbox
+          fi
+
+      - name: Lint focused runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${RUNNER_OS}" == "Linux" ]]; then
+            just argument-comment-lint -p codex-mcp-console-sandbox
+          fi
+          cargo clippy \
+            -p codex-mcp-console-sandbox \
+            --all-targets \
+            --all-features \
+            -- \
+            -D warnings
+
+      - name: Test native sandbox seams
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${RUNNER_OS}" == "Linux" ]]; then
+            just test -p codex-sandboxing
+            env \
+              "CARGO_BIN_EXE_bwrap=${CARGO_TARGET_DIR}/debug/bwrap" \
+              just test -p codex-linux-sandbox
+            just test -p codex-bwrap --no-tests=pass
+          else
+            just test \
+              -p codex-sandboxing \
+              --status-level fail \
+              --final-status-level fail \
+              -- \
+              --skip create_seatbelt_args_with_read_only_git_and_codex_subpaths \
+              --skip create_seatbelt_args_with_read_only_git_pointer_file
+          fi
+
+      - name: Validate configured Bazel target
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          bazel test \
+            --config=mcp-console-sandbox \
+            //codex-rs/mcp-console-sandbox:mcp-console-sandbox-lib-contract-test
+
+      - name: Build focused release artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${RUNNER_OS}" == "Linux" ]]; then
+            cargo build --locked -p codex-bwrap --bin bwrap --release
+            release_digest="$(sha256sum "${CARGO_TARGET_DIR}/release/bwrap" | cut -d ' ' -f 1)"
+            env \
+              "CODEX_BWRAP_SHA256=${release_digest}" \
+              cargo build \
+                --locked \
+                -p codex-mcp-console-sandbox \
+                --bin mcp-console-sandbox \
+                --release
+          else
+            cargo build \
+              --locked \
+              -p codex-mcp-console-sandbox \
+              --bin mcp-console-sandbox \
+              --release
+          fi
+
+      - name: Smoke focused release artifacts
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${RUNNER_OS}" == "Linux" ]]; then
+            env \
+              "CARGO_BIN_EXE_mcp-console-sandbox=${CARGO_TARGET_DIR}/release/mcp-console-sandbox" \
+              "CARGO_BIN_EXE_bwrap=${CARGO_TARGET_DIR}/release/bwrap" \
+              just test \
+                -p codex-mcp-console-sandbox \
+                --test runtime_contract \
+                host_read_only_denies_host_writes_without_creating_the_file
+          else
+            env \
+              "CARGO_BIN_EXE_mcp-console-sandbox=${CARGO_TARGET_DIR}/release/mcp-console-sandbox" \
+              just test \
+                -p codex-mcp-console-sandbox \
+                --test runtime_contract \
+                host_read_only_denies_host_writes_without_creating_the_file
+          fi
+
+      - name: Check for a clean worktree
+        if: always() && !cancelled()
+        uses: ./.github/actions/check-clean-worktree

@@ -1,0 +1,38 @@
+; MCP Console runtime compatibility additions. This profile is opt-in and is
+; not used by normal Codex sandbox callers.
+
+; MCP Console treats pre-existing terminal devices as host state. Inherited
+; descriptors remain usable, and PTYs created inside this sandbox carry the
+; extension used by the allow rule below.
+(deny file-read*
+  (literal "/dev/tty")
+  (regex #"^/dev/ttys[0-9]+$"))
+(deny file-ioctl
+  (require-all
+    (regex #"^/dev/ttys[0-9]+$")
+    (require-not (extension "com.apple.sandbox.pty"))))
+(allow file-read* file-write* file-ioctl
+  (require-all
+    (regex #"^/dev/ttys[0-9]+$")
+    (extension "com.apple.sandbox.pty")))
+
+; uv's SystemConfiguration probe and Quarto utilities use this device.
+(allow file-write-data file-ioctl
+  (require-all
+    (path "/dev/dtracehelper")
+    (vnode-type CHARACTER-DEVICE)))
+
+; Runtime and platform probes used by R, Python, uv, and Quarto.
+(allow sysctl-read
+  (sysctl-name "machdep.ptrauth_enabled")
+  (sysctl-name "kern.boottime")
+  (sysctl-name "kern.ngroups")
+  (sysctl-name-prefix "sysctl.oidfmt.")
+  (sysctl-name-prefix "sysctl.name.")
+  (sysctl-name "security.mac.lockdown_mode_state")
+  (sysctl-name "kern.bootargs"))
+
+(allow mach-lookup
+  (global-name "com.apple.SystemConfiguration.configd")
+  (global-name "com.apple.logd")
+  (global-name "com.apple.system.notification_center"))

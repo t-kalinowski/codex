@@ -20,6 +20,7 @@ use url::Url;
 
 const MACOS_SEATBELT_BASE_POLICY: &str = include_str!("seatbelt_base_policy.sbpl");
 const MACOS_SEATBELT_NETWORK_POLICY: &str = include_str!("seatbelt_network_policy.sbpl");
+const MACOS_SEATBELT_MCP_CONSOLE_POLICY: &str = include_str!("seatbelt_mcp_console_policy.sbpl");
 const MACOS_SEATBELT_PREFERENCES_POLICY: &str = include_str!("seatbelt_preferences_policy.sbpl");
 const MACOS_RESTRICTED_READ_ONLY_PLATFORM_DEFAULTS: &str =
     include_str!("restricted_read_only_platform_defaults.sbpl");
@@ -31,6 +32,7 @@ pub(crate) enum MacosSeatbeltProfile {
     #[default]
     Process,
     FileSystemHelper,
+    McpConsole,
 }
 
 #[derive(Debug)]
@@ -996,6 +998,9 @@ pub(crate) fn create_seatbelt_command_args_with_profile(
         if profile == MacosSeatbeltProfile::Process {
             policy_sections.push(MACOS_PROCESS_APPLICATIONS_READ_POLICY.to_string());
         }
+    }
+    if profile == MacosSeatbeltProfile::McpConsole {
+        policy_sections.push(MACOS_SEATBELT_MCP_CONSOLE_POLICY.to_string());
     }
     policy_sections.push(deny_read_policy);
     // Renaming an allowed ancestor relocates its protected descendants past

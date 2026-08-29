@@ -1,0 +1,20 @@
+load("//:defs.bzl", "codex_rust_crate")
+
+# Cargo runs build.rs to stamp Git builds. Bazel stamps each generated binary
+# directly through codex_rust_crate, so it must not run the Cargo-only script.
+codex_rust_crate(
+    name = "mcp-console-sandbox-lib",
+    build_script_enabled = False,
+    crate_name = "codex_mcp_console_sandbox",
+    extra_binaries_non_windows = [
+        "//codex-rs/bwrap:bwrap",
+    ],
+    rustc_env = {
+        "CARGO_PKG_VERSION": "0.150.1",
+    },
+    test_tags = [
+        "manual",
+        "mcp-console-sandbox-config-required",
+        "no-sandbox",
+    ],
+)

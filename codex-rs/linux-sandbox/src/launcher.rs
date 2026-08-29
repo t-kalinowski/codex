@@ -6,6 +6,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::process::Command;
 use std::sync::OnceLock;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 
 use crate::bundled_bwrap;
 use crate::bundled_bwrap::BundledBwrapLauncher;
@@ -19,6 +21,12 @@ enum BubblewrapLauncher {
     System(SystemBwrapLauncher),
     Bundled(BundledBwrapLauncher),
     Unavailable,
+}
+
+static MCP_CONSOLE_BUNDLED_BWRAP_REQUIRED: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn require_mcp_console_bundled_bwrap() {
+    MCP_CONSOLE_BUNDLED_BWRAP_REQUIRED.store(true, Ordering::Release);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,6 +135,11 @@ fn preferred_bwrap_launcher() -> BubblewrapLauncher {
     static LAUNCHER: OnceLock<BubblewrapLauncher> = OnceLock::new();
     LAUNCHER
         .get_or_init(|| {
+            if MCP_CONSOLE_BUNDLED_BWRAP_REQUIRED.load(Ordering::Acquire) {
+                return bundled_bwrap::mcp_console_launcher()
+                    .map(BubblewrapLauncher::Bundled)
+                    .unwrap_or(BubblewrapLauncher::Unavailable);
+            }
             if let Some(path) = find_system_bwrap_in_path()
                 && let Some(launcher) = system_bwrap_launcher_for_path(&path)
             {
