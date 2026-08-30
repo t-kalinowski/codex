@@ -1,8 +1,14 @@
 use codex_utils_cargo_bin::cargo_bin;
 use std::ffi::OsString;
+#[cfg(target_os = "linux")]
+use std::fs::File;
+#[cfg(target_os = "linux")]
+use std::io::copy;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
+#[cfg(target_os = "linux")]
+use tempfile::NamedTempFile;
 use tempfile::TempDir;
 
 pub struct RunnerExecutable {
@@ -54,13 +60,48 @@ impl RunnerExecutable {
 
 #[cfg(target_os = "linux")]
 fn copy_executable(source: &Path, destination: &Path) {
-    std::fs::copy(source, destination).unwrap_or_else(|error| {
+    let mut source_file = File::open(source)
+        .unwrap_or_else(|error| panic!("open executable {}: {error}", source.display()));
+    let permissions = source_file
+        .metadata()
+        .unwrap_or_else(|error| panic!("inspect executable {}: {error}", source.display()))
+        .permissions();
+    let parent = destination
+        .parent()
+        .expect("staged executable must have a parent directory");
+    let mut staged = NamedTempFile::new_in(parent).unwrap_or_else(|error| {
         panic!(
-            "copy executable {} to {}: {error}",
+            "create temporary executable beside {}: {error}",
+            destination.display()
+        )
+    });
+    copy(&mut source_file, staged.as_file_mut()).unwrap_or_else(|error| {
+        panic!(
+            "copy executable {} to temporary file beside {}: {error}",
             source.display(),
             destination.display()
         )
     });
+    staged
+        .as_file()
+        .set_permissions(permissions)
+        .unwrap_or_else(|error| {
+            panic!(
+                "set executable permissions for {}: {error}",
+                destination.display()
+            )
+        });
+    let staged = staged.into_temp_path();
+    staged
+        .persist_noclobber(destination)
+        .unwrap_or_else(|error| {
+            panic!(
+                "publish executable {} to {}: {}",
+                source.display(),
+                destination.display(),
+                error.error
+            )
+        });
 }
 
 pub fn apply_sanitized_environment(command: &mut Command, overrides: &[(&str, &str)]) {
