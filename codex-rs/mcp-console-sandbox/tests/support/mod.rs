@@ -106,7 +106,7 @@ impl Runner {
             with_io,
             TempDir::new().expect("state directory"),
             RunnerExecutable::stage_linux(/*include_bwrap*/ false),
-            None,
+            /*ignored_signal*/ None,
         )
     }
 
@@ -127,7 +127,7 @@ impl Runner {
             with_io,
             TempDir::new().expect("state directory"),
             RunnerExecutable::stage_linux_with_companion(Some(&companion)),
-            None,
+            /*ignored_signal*/ None,
         )
     }
 
