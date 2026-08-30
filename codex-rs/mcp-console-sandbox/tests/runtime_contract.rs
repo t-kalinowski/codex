@@ -63,6 +63,40 @@ fn passed_streams_are_byte_transparent_independent_and_closed_by_the_runner() {
     assert_eq!(stderr, input);
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn denied_network_preserves_connected_unix_stream_io() {
+    let target = fixture_target(&["connected-unix-stream-io"]);
+    let (mut runner, io) = Runner::spawn(&target, &[], /*with_io*/ true);
+    let mut io = io.expect("target streams");
+    assert_eq!(
+        runner.request(default_launch(
+            /*id*/ 3,
+            std::env::current_dir()
+                .expect("current directory")
+                .as_path(),
+            json!([]),
+            json!({ "mode": "denied" }),
+            passed_streams(),
+        ))["type"],
+        "launch_accepted"
+    );
+
+    let mut ready = [0_u8; 1];
+    io.stdout
+        .read_exact(&mut ready)
+        .expect("read target readiness");
+    assert_eq!(ready, *b"R");
+    io.stdin.write_all(b"I").expect("write target request");
+
+    let mut response = Vec::new();
+    io.stdout
+        .read_to_end(&mut response)
+        .expect("read target response to shutdown");
+    assert_eq!(response, b"O");
+    assert_target_exit(&runner.request(wait_request(/*id*/ 4)), /*code*/ 0);
+}
+
 #[test]
 fn large_simultaneous_stdout_and_stderr_do_not_deadlock() {
     const LENGTH: usize = 2 * 1024 * 1024;

@@ -190,18 +190,21 @@ fn install_network_seccomp_filter_on_current_thread(
             deny_syscall(&mut rules, libc::SYS_accept4);
             deny_syscall(&mut rules, libc::SYS_bind);
             deny_syscall(&mut rules, libc::SYS_listen);
-            deny_syscall(&mut rules, libc::SYS_getpeername);
-            deny_syscall(&mut rules, libc::SYS_getsockname);
-            deny_syscall(&mut rules, libc::SYS_shutdown);
-            deny_syscall(&mut rules, libc::SYS_sendto);
             deny_syscall(&mut rules, libc::SYS_sendmmsg);
-            // NOTE: allowing recvfrom allows some tools like: `cargo clippy`
-            // to run with their socketpair + child processes for sub-proc
-            // management.
-            // deny_syscall(&mut rules, libc::SYS_recvfrom);
             deny_syscall(&mut rules, libc::SYS_recvmmsg);
-            deny_syscall(&mut rules, libc::SYS_getsockopt);
-            deny_syscall(&mut rules, libc::SYS_setsockopt);
+
+            // Preserve connected sockets that the launcher deliberately
+            // passed into the sandbox for process-local IPC. Socket metadata,
+            // options, shutdown, and recvfrom cannot establish a new endpoint.
+            // A null destination similarly makes sendto operate on an already
+            // connected socket; addressed sends remain blocked.
+            let deny_addressed_sendto = SeccompRule::new(vec![SeccompCondition::new(
+                4, // fifth argument (destination address)
+                SeccompCmpArgLen::Qword,
+                SeccompCmpOp::Ne,
+                0,
+            )?])?;
+            rules.insert(libc::SYS_sendto, vec![deny_addressed_sendto]);
 
             // For `socket` we allow AF_UNIX (arg0 == AF_UNIX) and deny
             // everything else.

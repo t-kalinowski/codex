@@ -33,6 +33,8 @@ fn main() {
                 .into_os_string(),
         ]),
         Some("copy") => copy_streams(),
+        #[cfg(target_os = "linux")]
+        Some("connected-unix-stream-io") => connected_unix_stream_io(),
         Some("emit-large") => emit_large(parse_usize(arguments.next())),
         Some("write") => write_file(arguments.next(), arguments.next()),
         Some("connect") => connect(arguments.next(), arguments.next()),
@@ -196,6 +198,125 @@ fn copy_streams() -> Result<(), String> {
     std::io::stderr()
         .write_all(&bytes)
         .map_err(|error| error.to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn connected_unix_stream_io() -> Result<(), String> {
+    let mut socket_type = 0;
+    let mut socket_type_length = libc::socklen_t::try_from(std::mem::size_of_val(&socket_type))
+        .map_err(|error| error.to_string())?;
+    if unsafe {
+        libc::getsockopt(
+            libc::STDOUT_FILENO,
+            libc::SOL_SOCKET,
+            libc::SO_TYPE,
+            (&raw mut socket_type).cast(),
+            &raw mut socket_type_length,
+        )
+    } != 0
+    {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    if socket_type != libc::SOCK_STREAM {
+        return Err(format!("unexpected socket type: {socket_type}"));
+    }
+    let keepalive = 0;
+    if unsafe {
+        libc::setsockopt(
+            libc::STDOUT_FILENO,
+            libc::SOL_SOCKET,
+            libc::SO_KEEPALIVE,
+            (&raw const keepalive).cast(),
+            libc::socklen_t::try_from(std::mem::size_of_val(&keepalive))
+                .map_err(|error| error.to_string())?,
+        )
+    } != 0
+    {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+
+    for address_call in [
+        libc::getsockname as unsafe extern "C" fn(_, _, _) -> _,
+        libc::getpeername as unsafe extern "C" fn(_, _, _) -> _,
+    ] {
+        let mut address = std::mem::MaybeUninit::<libc::sockaddr_storage>::zeroed();
+        let mut address_length =
+            libc::socklen_t::try_from(std::mem::size_of::<libc::sockaddr_storage>())
+                .map_err(|error| error.to_string())?;
+        if unsafe {
+            address_call(
+                libc::STDOUT_FILENO,
+                address.as_mut_ptr().cast(),
+                &raw mut address_length,
+            )
+        } != 0
+        {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        let address = unsafe { address.assume_init() };
+        if i32::from(address.ss_family) != libc::AF_UNIX {
+            return Err(format!("unexpected socket family: {}", address.ss_family));
+        }
+    }
+
+    let ready = b"R";
+    let written = unsafe {
+        libc::sendto(
+            libc::STDOUT_FILENO,
+            ready.as_ptr().cast(),
+            ready.len(),
+            libc::MSG_NOSIGNAL,
+            std::ptr::null(),
+            0,
+        )
+    };
+    if written != 1 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+
+    let mut request = [0_u8; 1];
+    loop {
+        let read = unsafe {
+            libc::recvfrom(
+                libc::STDIN_FILENO,
+                request.as_mut_ptr().cast(),
+                request.len(),
+                libc::MSG_DONTWAIT,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        if read == 1 {
+            break;
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::WouldBlock {
+            return Err(error.to_string());
+        }
+        std::thread::yield_now();
+    }
+    if request != *b"I" {
+        return Err(format!("unexpected request byte: {request:?}"));
+    }
+
+    let response = b"O";
+    let written = unsafe {
+        libc::sendto(
+            libc::STDOUT_FILENO,
+            response.as_ptr().cast(),
+            response.len(),
+            libc::MSG_NOSIGNAL,
+            std::ptr::null(),
+            0,
+        )
+    };
+    if written != 1 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    if unsafe { libc::shutdown(libc::STDOUT_FILENO, libc::SHUT_WR) } != 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    Ok(())
 }
 
 fn bind(host: Option<OsString>, port: Option<OsString>) -> Result<(), String> {
