@@ -150,15 +150,15 @@ jobs:
           set -euo pipefail
           if [[ "${RUNNER_OS}" == "Linux" ]]; then
             env \
-              "CARGO_BIN_EXE_mcp-console-sandbox=${CARGO_TARGET_DIR}/release/mcp-console-sandbox" \
-              "CARGO_BIN_EXE_bwrap=${CARGO_TARGET_DIR}/release/bwrap" \
+              "MCP_CONSOLE_SANDBOX_TEST_RUNNER=${CARGO_TARGET_DIR}/release/mcp-console-sandbox" \
+              "MCP_CONSOLE_SANDBOX_TEST_BWRAP=${CARGO_TARGET_DIR}/release/bwrap" \
               just test \
                 -p codex-mcp-console-sandbox \
                 --test runtime_contract \
                 host_read_only_denies_host_writes_without_creating_the_file
           else
             env \
-              "CARGO_BIN_EXE_mcp-console-sandbox=${CARGO_TARGET_DIR}/release/mcp-console-sandbox" \
+              "MCP_CONSOLE_SANDBOX_TEST_RUNNER=${CARGO_TARGET_DIR}/release/mcp-console-sandbox" \
               just test \
                 -p codex-mcp-console-sandbox \
                 --test runtime_contract \

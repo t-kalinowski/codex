@@ -11,6 +11,10 @@ use std::process::Command;
 use tempfile::NamedTempFile;
 use tempfile::TempDir;
 
+const TEST_RUNNER_ENV: &str = "MCP_CONSOLE_SANDBOX_TEST_RUNNER";
+#[cfg(target_os = "linux")]
+const TEST_BWRAP_ENV: &str = "MCP_CONSOLE_SANDBOX_TEST_BWRAP";
+
 pub struct RunnerExecutable {
     path: PathBuf,
     _staging_directory: Option<TempDir>,
@@ -22,7 +26,7 @@ impl RunnerExecutable {
         let executable = Self::stage_linux(/*include_bwrap*/ true);
         #[cfg(not(target_os = "linux"))]
         let executable = Self {
-            path: cargo_bin("mcp-console-sandbox").expect("runner binary"),
+            path: test_binary(TEST_RUNNER_ENV, "mcp-console-sandbox"),
             _staging_directory: None,
         };
         executable
@@ -34,7 +38,7 @@ impl RunnerExecutable {
 
     #[cfg(target_os = "linux")]
     pub(super) fn stage_linux(include_bwrap: bool) -> Self {
-        let companion = include_bwrap.then(|| cargo_bin("bwrap").expect("workspace bwrap binary"));
+        let companion = include_bwrap.then(|| test_binary(TEST_BWRAP_ENV, "bwrap"));
         Self::stage_linux_with_companion(companion.as_deref())
     }
 
@@ -42,10 +46,7 @@ impl RunnerExecutable {
     pub(super) fn stage_linux_with_companion(companion: Option<&Path>) -> Self {
         let staging_directory = TempDir::new().expect("runner staging directory");
         let path = staging_directory.path().join("mcp-console-sandbox");
-        copy_executable(
-            &cargo_bin("mcp-console-sandbox").expect("runner binary"),
-            &path,
-        );
+        copy_executable(&test_binary(TEST_RUNNER_ENV, "mcp-console-sandbox"), &path);
         if let Some(companion) = companion {
             let resources = staging_directory.path().join("codex-resources");
             std::fs::create_dir(&resources).expect("create runner resources directory");
@@ -56,6 +57,18 @@ impl RunnerExecutable {
             _staging_directory: Some(staging_directory),
         }
     }
+}
+
+fn test_binary(override_env: &str, cargo_name: &str) -> PathBuf {
+    let path = std::env::var_os(override_env)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| cargo_bin(cargo_name).expect("Cargo-built test binary"));
+    assert!(
+        path.is_absolute() && path.is_file(),
+        "{override_env} must resolve to an absolute executable file: {}",
+        path.display()
+    );
+    path
 }
 
 #[cfg(target_os = "linux")]
