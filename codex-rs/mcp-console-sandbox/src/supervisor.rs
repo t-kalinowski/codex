@@ -41,6 +41,7 @@ use crate::stdio::ForegroundTerminal;
 
 struct StopState {
     requested: AtomicBool,
+    #[cfg(target_os = "macos")]
     control_lost: AtomicBool,
     #[cfg(not(target_os = "macos"))]
     forced: AtomicBool,
@@ -81,12 +82,14 @@ impl Supervisor {
         #[cfg(target_os = "macos")] foreground_terminal: Option<ForegroundTerminal>,
         #[cfg(not(target_os = "macos"))] cleanup_directory: CleanupDirectory,
     ) -> Self {
+        #[cfg(target_os = "macos")]
         let target_process_id = process_group_id;
         let process_group_id = Arc::new(Mutex::new(Some(process_group_id)));
         #[cfg(not(target_os = "macos"))]
         let force_task = Arc::new(Mutex::new(None::<tokio::task::JoinHandle<()>>));
         let stop = Arc::new(StopState {
             requested: AtomicBool::new(false),
+            #[cfg(target_os = "macos")]
             control_lost: AtomicBool::new(false),
             #[cfg(not(target_os = "macos"))]
             forced: AtomicBool::new(false),

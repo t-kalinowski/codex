@@ -167,10 +167,12 @@ mod unix {
     }
 
     impl ForegroundTerminal {
+        #[cfg(target_os = "macos")]
         pub(crate) fn duplicate_for_lifetime_manager(&self) -> io::Result<OwnedFd> {
             self.descriptor.try_clone()
         }
 
+        #[cfg(target_os = "macos")]
         pub(crate) unsafe fn from_inherited_descriptor(descriptor: i32) -> io::Result<Self> {
             let original_process_group = unsafe { libc::tcgetpgrp(descriptor) };
             if original_process_group == -1 {

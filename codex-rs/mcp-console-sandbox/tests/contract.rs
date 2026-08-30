@@ -39,6 +39,7 @@ mod unix {
     use pretty_assertions::assert_eq;
     use std::ffi::OsString;
     use std::os::fd::AsRawFd;
+    #[cfg(target_os = "macos")]
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::ffi::OsStringExt;
     use std::os::unix::fs::MetadataExt;
@@ -324,6 +325,7 @@ mod unix {
         };
         let (_status_reader, status_writer) = UnixStream::pair().expect("status pair");
         let (gate_reader, _gate_writer) = UnixStream::pair().expect("gate pair");
+        #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
         let mut inherited = vec![
             status_writer.as_raw_fd(),
             gate_reader.as_raw_fd(),

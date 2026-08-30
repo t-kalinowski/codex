@@ -133,7 +133,7 @@ fn dispatch_path_bwrap_probe() -> bool {
     if std::env::args_os()
         .next()
         .as_deref()
-        .and_then(std::path::Path::file_name)
+        .and_then(|arg0| std::path::Path::new(arg0).file_name())
         != Some(OsStr::new("bwrap"))
     {
         return false;

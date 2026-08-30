@@ -6,13 +6,17 @@ use anyhow::bail;
 use std::ffi::OsString;
 use std::fs::OpenOptions;
 use std::io::Read;
+#[cfg(target_os = "macos")]
 use std::io::Seek;
+#[cfg(target_os = "macos")]
 use std::io::SeekFrom;
 use std::io::Write;
 use std::os::fd::AsRawFd;
 use std::os::fd::FromRawFd;
 use std::os::fd::OwnedFd;
+#[cfg(target_os = "macos")]
 use std::os::unix::ffi::OsStrExt;
+#[cfg(target_os = "macos")]
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::OpenOptionsExt;
@@ -502,7 +506,7 @@ fn verify_linux_sandbox(require_seccomp: bool) -> Result<()> {
     if require_seccomp {
         let seccomp = unsafe { libc::prctl(libc::PR_GET_SECCOMP) };
         anyhow::ensure!(
-            seccomp == libc::SECCOMP_MODE_FILTER,
+            seccomp == libc::SECCOMP_MODE_FILTER as libc::c_int,
             "launch bridge is missing the required Linux seccomp filter"
         );
     }

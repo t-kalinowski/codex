@@ -27,11 +27,11 @@ pub const TARGET_STDERR_FD: i32 = 192;
 const CHILD_CONTROL_FD: i32 = 198;
 
 pub struct Runner {
-    process_id: u32,
+    _process_id: u32,
     child: Child,
     pub control: UnixStream,
     state_dir: TempDir,
-    cleanup_dir: TempDir,
+    _cleanup_dir: TempDir,
     _runner_executable: RunnerExecutable,
 }
 
@@ -223,11 +223,11 @@ impl Runner {
         drop(child_streams);
         (
             Self {
-                process_id: child.id(),
+                _process_id: child.id(),
                 child,
                 control,
                 state_dir,
-                cleanup_dir,
+                _cleanup_dir: cleanup_dir,
                 _runner_executable: runner_executable,
             },
             parent_io,
@@ -276,11 +276,11 @@ impl Runner {
         drop((child_control, slave));
         (
             Self {
-                process_id: child.id(),
+                _process_id: child.id(),
                 child,
                 control,
                 state_dir,
-                cleanup_dir,
+                _cleanup_dir: cleanup_dir,
                 _runner_executable: runner_executable,
             },
             master,
@@ -331,11 +331,11 @@ impl Runner {
         drop((child_control, slave));
         (
             Self {
-                process_id: child.id(),
+                _process_id: child.id(),
                 child,
                 control,
                 state_dir,
-                cleanup_dir,
+                _cleanup_dir: cleanup_dir,
                 _runner_executable: runner_executable,
             },
             master,
@@ -407,11 +407,11 @@ impl Runner {
         let process_id = u32::from_be_bytes(process_id);
         (
             Self {
-                process_id,
+                _process_id: process_id,
                 child,
                 control,
                 state_dir,
-                cleanup_dir,
+                _cleanup_dir: cleanup_dir,
                 _runner_executable: runner_executable,
             },
             master,
@@ -458,11 +458,11 @@ impl Runner {
         drop(child_control);
         (
             Self {
-                process_id: child.id(),
+                _process_id: child.id(),
                 child,
                 control,
                 state_dir,
-                cleanup_dir,
+                _cleanup_dir: cleanup_dir,
                 _runner_executable: runner_executable,
             },
             parent_stdout,
@@ -510,11 +510,11 @@ impl Runner {
         drop(child_control);
         (
             Self {
-                process_id: child.id(),
+                _process_id: child.id(),
                 child,
                 control,
                 state_dir,
-                cleanup_dir,
+                _cleanup_dir: cleanup_dir,
                 _runner_executable: runner_executable,
             },
             parent_stdin,
@@ -545,11 +545,11 @@ impl Runner {
         apply_sanitized_environment(&mut command, &[]);
         let child = command.spawn().expect("spawn runner");
         Self {
-            process_id: child.id(),
+            _process_id: child.id(),
             child,
             control,
             state_dir,
-            cleanup_dir,
+            _cleanup_dir: cleanup_dir,
             _runner_executable: runner_executable,
         }
     }
@@ -567,17 +567,20 @@ impl Runner {
         self._runner_executable.path()
     }
 
+    #[cfg(target_os = "macos")]
     pub fn cleanup_dir(&self) -> &Path {
-        self.cleanup_dir.path()
+        self._cleanup_dir.path()
     }
 
+    #[cfg(target_os = "macos")]
     pub fn process_id(&self) -> u32 {
-        self.process_id
+        self._process_id
     }
 
+    #[cfg(target_os = "macos")]
     pub fn signal(&self, signal: libc::c_int) {
         assert_eq!(
-            unsafe { libc::kill(self.process_id as libc::pid_t, signal) },
+            unsafe { libc::kill(self._process_id as libc::pid_t, signal) },
             0,
             "signal runner: {}",
             std::io::Error::last_os_error()

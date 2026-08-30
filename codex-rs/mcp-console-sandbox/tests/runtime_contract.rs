@@ -10,12 +10,8 @@ use std::ffi::OsString;
 use std::io::Read;
 use std::io::Write;
 use std::net::TcpListener;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(target_os = "macos")]
 use std::os::fd::AsRawFd;
-#[cfg(target_os = "linux")]
-use std::os::fd::FromRawFd;
-#[cfg(target_os = "linux")]
-use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStringExt;
 #[cfg(target_os = "macos")]
 use std::os::unix::process::ExitStatusExt;
@@ -3020,125 +3016,4 @@ fn decode_optional_values(mut bytes: &[u8]) -> Vec<Option<Vec<u8>>> {
         }
     }
     values
-}
-
-#[cfg(target_os = "linux")]
-fn write_linux_companion(directory: &Path, name: &str, body: &str) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-
-    let path = directory.join(name);
-    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write companion fixture");
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-        .expect("make companion fixture executable");
-    path
-}
-
-#[cfg(target_os = "linux")]
-fn set_linux_companion_behavior(runner: &Runner, behavior: &str) -> std::path::PathBuf {
-    let companion = runner
-        .runner_path()
-        .parent()
-        .expect("runner directory")
-        .join("codex-resources/bwrap");
-    std::fs::write(
-        companion.with_extension("mcp-console-test-behavior"),
-        behavior,
-    )
-    .expect("write Linux companion behavior");
-    companion
-}
-
-#[cfg(target_os = "linux")]
-fn wait_for_linux_process_exit(process_id: i32, timeout: std::time::Duration) {
-    let descriptor = unsafe {
-        libc::syscall(libc::SYS_pidfd_open, process_id, /*flags*/ 0)
-    };
-    if descriptor == -1 {
-        assert_eq!(
-            std::io::Error::last_os_error().raw_os_error(),
-            Some(libc::ESRCH),
-            "open process {process_id}"
-        );
-        return;
-    }
-    let process = unsafe { OwnedFd::from_raw_fd(descriptor as i32) };
-    wait_for_linux_process_handle_exit(&process, timeout);
-}
-
-#[cfg(target_os = "linux")]
-fn linux_descendant_marker(label: &str) -> String {
-    format!("mcp-console-sandbox-test-{}-{label}", std::process::id())
-}
-
-#[cfg(target_os = "linux")]
-fn open_linux_process_with_marker(marker: &str, timeout: std::time::Duration) -> OwnedFd {
-    let deadline = std::time::Instant::now() + timeout;
-    loop {
-        let mut matching_processes = Vec::new();
-        for entry in std::fs::read_dir("/proc").expect("read host process table") {
-            let Ok(entry) = entry else {
-                continue;
-            };
-            let Some(process_id) = entry
-                .file_name()
-                .to_str()
-                .and_then(|name| name.parse::<i32>().ok())
-            else {
-                continue;
-            };
-            let Ok(command_line) = std::fs::read(entry.path().join("cmdline")) else {
-                continue;
-            };
-            let arguments = command_line
-                .split(|byte| *byte == 0)
-                .filter(|argument| !argument.is_empty())
-                .collect::<Vec<_>>();
-            if arguments.contains(&b"marked-sleep".as_slice())
-                && arguments.contains(&marker.as_bytes())
-            {
-                matching_processes.push(process_id);
-            }
-        }
-        assert!(
-            matching_processes.len() <= 1,
-            "multiple host processes matched descendant marker {marker}: {matching_processes:?}"
-        );
-        if let Some(process_id) = matching_processes.pop() {
-            let descriptor = unsafe {
-                libc::syscall(libc::SYS_pidfd_open, process_id, /*flags*/ 0)
-            };
-            if descriptor >= 0 {
-                return unsafe { OwnedFd::from_raw_fd(descriptor as i32) };
-            }
-            assert_eq!(
-                std::io::Error::last_os_error().raw_os_error(),
-                Some(libc::ESRCH),
-                "open marked descendant {process_id}"
-            );
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "marked descendant {marker} was not visible in the host process table"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn wait_for_linux_process_handle_exit(process: &OwnedFd, timeout: std::time::Duration) {
-    let timeout_ms = i32::try_from(timeout.as_millis()).expect("process-exit timeout milliseconds");
-    let mut descriptor = libc::pollfd {
-        fd: process.as_raw_fd(),
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    assert_eq!(
-        unsafe {
-            libc::poll(&mut descriptor, /*nfds*/ 1, timeout_ms)
-        },
-        1,
-        "process did not exit before {timeout:?}: {}",
-        std::io::Error::last_os_error()
-    );
-    assert_ne!(descriptor.revents & libc::POLLIN, 0);
 }
