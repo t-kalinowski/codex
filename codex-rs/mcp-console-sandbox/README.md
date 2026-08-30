@@ -19,6 +19,11 @@ There is no unsandboxed backend or fallback.
 | Linux | Supported | Codex's Linux helper and packaged bubblewrap, namespaces, seccomp, and synthetic mounts through `SandboxManager` |
 | Windows | Discovery only | Discovery reports `backend: "unsupported"`; setup and launch fail before a target starts |
 
+Linux requires kernel 5.11 or newer and a host policy that permits unprivileged
+user namespaces. Discovery verifies the required companion; it does not probe
+those host prerequisites. Launch is the definitive check and fails closed
+before target execution when they are unavailable.
+
 Windows launch and setup are intentionally deferred. The protocol retains the
 closed Windows extension and setup vocabulary so support can be added in a
 later rolling patch without inventing a second interface.

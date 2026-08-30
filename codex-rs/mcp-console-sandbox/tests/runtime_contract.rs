@@ -2130,9 +2130,9 @@ fn macos_normal_finish_allows_both_grace_periods_before_force() {
     assert_processes_exit(&[descendant_process_id], std::time::Duration::from_secs(2));
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
-fn macos_preserves_cleanup_state_when_directory_identity_changes() {
+fn preserves_cleanup_state_when_directory_identity_changes() {
     let target = fixture_target(&["ready-then-wait"]);
     let (mut runner, io) = Runner::spawn(&target, &[], /*with_io*/ true);
     let mut io = io.expect("target streams");
@@ -2172,9 +2172,9 @@ fn macos_preserves_cleanup_state_when_directory_identity_changes() {
     std::fs::remove_dir_all(&displaced_directory).expect("remove displaced cleanup directory");
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
-fn macos_cleanup_repairs_target_directory_permissions() {
+fn cleanup_repairs_target_directory_permissions() {
     let target = fixture_target(&["lock-child-and-exit", "23"]);
     let (mut runner, _) = Runner::spawn(&target, &[], /*with_io*/ false);
     let cleanup_directory = runner.cleanup_dir().to_path_buf();
@@ -2265,6 +2265,55 @@ fn macos_does_not_remove_a_replacement_cleanup_directory_during_launch() {
             "{response}"
         );
     }
+
+    std::fs::remove_dir(&cleanup_directory).expect("remove replacement cleanup directory");
+    std::fs::remove_dir_all(&displaced_directory).expect("remove displaced cleanup directory");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_reports_a_replacement_cleanup_directory_in_the_final_outcome() {
+    let target = fixture_target(&["exit", "0"]);
+    let (mut runner, _) = Runner::spawn(&target, &[], /*with_io*/ false);
+    assert_eq!(
+        runner.request(json!({
+            "id": 9266,
+            "protocol_version": 1,
+            "type": "discover",
+        }))["type"],
+        "capabilities"
+    );
+    let cleanup_directory = runner.cleanup_dir().to_path_buf();
+    let displaced_directory = cleanup_directory.with_extension("displaced-before-launch");
+    std::fs::rename(&cleanup_directory, &displaced_directory)
+        .expect("displace target cleanup directory");
+    std::fs::create_dir(&cleanup_directory).expect("replace target cleanup directory");
+
+    let response = runner.request(default_launch(
+        /*id*/ 9267,
+        std::env::current_dir()
+            .expect("current directory")
+            .as_path(),
+        json!([]),
+        json!({ "mode": "denied" }),
+        null_streams(),
+    ));
+    assert_eq!(response["type"], "launch_accepted", "{response}");
+
+    let outcome = runner.request(wait_request(/*id*/ 9268));
+    assert_target_exit(&outcome, /*code*/ 0);
+    assert_eq!(
+        outcome["outcome"]["retirement"]["complete"], true,
+        "{outcome}"
+    );
+    assert!(
+        outcome["outcome"]["infrastructure"]["cleanup_error"]
+            .as_str()
+            .is_some_and(|error| error.contains("identity changed")),
+        "{outcome}"
+    );
+    assert!(cleanup_directory.exists());
+    assert!(displaced_directory.exists());
 
     std::fs::remove_dir(&cleanup_directory).expect("remove replacement cleanup directory");
     std::fs::remove_dir_all(&displaced_directory).expect("remove displaced cleanup directory");
@@ -2898,7 +2947,7 @@ fn control_loss_retires_the_target_generation() {
     );
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn control_loss_exits_unsuccessfully_when_cleanup_cannot_be_claimed() {
     let target = fixture_target(&["ready-then-wait"]);

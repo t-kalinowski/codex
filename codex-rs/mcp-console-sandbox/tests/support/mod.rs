@@ -567,7 +567,7 @@ impl Runner {
         self._runner_executable.path()
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub fn cleanup_dir(&self) -> &Path {
         self._cleanup_dir.path()
     }
