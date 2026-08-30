@@ -63,6 +63,37 @@ fn passed_streams_are_byte_transparent_independent_and_closed_by_the_runner() {
     assert_eq!(stderr, input);
 }
 
+#[test]
+fn target_closing_stdin_releases_the_writer_while_the_target_remains_live() {
+    let target = fixture_target(&["close-stdin-then-ready-and-wait"]);
+    let (mut runner, io) = Runner::spawn(&target, &[], /*with_io*/ true);
+    let mut io = io.expect("target streams");
+    assert_eq!(
+        runner.request(default_launch(
+            /*id*/ 5,
+            std::env::current_dir()
+                .expect("current directory")
+                .as_path(),
+            json!([]),
+            json!({ "mode": "denied" }),
+            passed_streams(),
+        ))["type"],
+        "launch_accepted"
+    );
+
+    let mut ready = [0_u8; 1];
+    io.stdout
+        .read_exact(&mut ready)
+        .expect("read target readiness");
+    assert_eq!(ready, *b"R");
+    io.stdin
+        .write_all(b"D")
+        .expect_err("target stdin writer should be released");
+
+    runner.close_control();
+    assert!(runner.wait_for_exit().success());
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn denied_network_preserves_connected_unix_stream_io() {

@@ -66,6 +66,7 @@ static int proc_fd = -1;
 static const char *opt_exec_label = NULL;
 static const char *opt_file_label = NULL;
 static bool opt_as_pid_1;
+static bool opt_mcp_console_release_monitor_streams;
 
 static const char *opt_argv0 = NULL;
 static const char *opt_chdir_path = NULL;
@@ -438,6 +439,24 @@ close_extra_fds (void *data, int fd)
   return 0;
 }
 
+static void
+release_monitor_streams (void)
+{
+  int null_fd;
+  int fd;
+
+  null_fd = TEMP_FAILURE_RETRY (open ("/dev/null", O_RDWR | O_CLOEXEC));
+  if (null_fd == -1)
+    die_with_error ("Can't open /dev/null for monitor streams");
+
+  for (fd = STDIN_FILENO; fd <= STDERR_FILENO; fd++)
+    if (TEMP_FAILURE_RETRY (dup2 (null_fd, fd)) == -1)
+      die_with_error ("Can't release monitor stream");
+
+  if (null_fd > STDERR_FILENO)
+    close (null_fd);
+}
+
 static int
 propagate_exit_status (int status)
 {
@@ -523,6 +542,8 @@ monitor_child (int event_fd, pid_t child_pid, int setup_finished_fd)
     dont_close[j++] = setup_finished_fd;
   assert (j < sizeof(dont_close)/sizeof(*dont_close));
   fdwalk (proc_fd, close_extra_fds, dont_close);
+  if (opt_mcp_console_release_monitor_streams)
+    release_monitor_streams ();
 
   sigemptyset (&mask);
   sigaddset (&mask, SIGCHLD);
@@ -2617,6 +2638,10 @@ parse_args_recurse (int          *argcp,
       else if (strcmp (arg, "--as-pid-1") == 0)
         {
           opt_as_pid_1 = true;
+        }
+      else if (strcmp (arg, "--mcp-console-release-monitor-streams") == 0)
+        {
+          opt_mcp_console_release_monitor_streams = true;
         }
       else if (strcmp (arg, "--cap-add") == 0)
         {

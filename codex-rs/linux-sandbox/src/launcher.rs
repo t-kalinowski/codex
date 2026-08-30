@@ -29,6 +29,10 @@ pub(crate) fn require_mcp_console_bundled_bwrap() {
     MCP_CONSOLE_BUNDLED_BWRAP_REQUIRED.store(true, Ordering::Release);
 }
 
+pub(crate) fn mcp_console_bundled_bwrap_required() -> bool {
+    MCP_CONSOLE_BUNDLED_BWRAP_REQUIRED.load(Ordering::Acquire)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SystemBwrapLauncher {
     program: AbsolutePathBuf,
@@ -135,7 +139,7 @@ fn preferred_bwrap_launcher() -> BubblewrapLauncher {
     static LAUNCHER: OnceLock<BubblewrapLauncher> = OnceLock::new();
     LAUNCHER
         .get_or_init(|| {
-            if MCP_CONSOLE_BUNDLED_BWRAP_REQUIRED.load(Ordering::Acquire) {
+            if mcp_console_bundled_bwrap_required() {
                 return bundled_bwrap::mcp_console_launcher()
                     .map(BubblewrapLauncher::Bundled)
                     .unwrap_or(BubblewrapLauncher::Unavailable);

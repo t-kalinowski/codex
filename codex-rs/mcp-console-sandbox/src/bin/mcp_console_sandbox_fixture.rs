@@ -33,6 +33,8 @@ fn main() {
                 .into_os_string(),
         ]),
         Some("copy") => copy_streams(),
+        #[cfg(unix)]
+        Some("close-stdin-then-ready-and-wait") => close_stdin_then_ready_and_wait(),
         #[cfg(target_os = "linux")]
         Some("connected-unix-stream-io") => connected_unix_stream_io(),
         Some("emit-large") => emit_large(parse_usize(arguments.next())),
@@ -198,6 +200,22 @@ fn copy_streams() -> Result<(), String> {
     std::io::stderr()
         .write_all(&bytes)
         .map_err(|error| error.to_string())
+}
+
+#[cfg(unix)]
+fn close_stdin_then_ready_and_wait() -> Result<(), String> {
+    if unsafe { libc::close(libc::STDIN_FILENO) } == -1 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    std::io::stdout()
+        .write_all(b"R")
+        .and_then(|()| std::io::stdout().flush())
+        .map_err(|error| error.to_string())?;
+    loop {
+        unsafe {
+            libc::pause();
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]

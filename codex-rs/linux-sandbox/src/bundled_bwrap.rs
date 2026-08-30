@@ -24,7 +24,7 @@ const MAX_MCP_CONSOLE_BWRAP_SIZE: u64 = 64 * 1024 * 1024;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BundledBwrapLauncher {
     program: AbsolutePathBuf,
-    require_digest: bool,
+    mcp_console_companion: bool,
 }
 
 pub(crate) fn launcher() -> Option<BundledBwrapLauncher> {
@@ -33,7 +33,7 @@ pub(crate) fn launcher() -> Option<BundledBwrapLauncher> {
         .or_else(|| find_legacy_for_exe(&current_exe))
         .map(|program| BundledBwrapLauncher {
             program,
-            require_digest: false,
+            mcp_console_companion: false,
         })
 }
 
@@ -47,7 +47,7 @@ pub(crate) fn mcp_console_launcher() -> Option<BundledBwrapLauncher> {
                 program.display()
             )
         }),
-        require_digest: true,
+        mcp_console_companion: true,
     })
 }
 
@@ -67,14 +67,14 @@ pub(crate) fn verify_mcp_console_companion() -> Result<(), String> {
 }
 
 impl BundledBwrapLauncher {
-    pub(crate) fn exec(&self, argv: Vec<String>, preserved_files: Vec<File>) -> ! {
+    pub(crate) fn exec(&self, mut argv: Vec<String>, preserved_files: Vec<File>) -> ! {
         let bwrap_file = File::open(self.program.as_path()).unwrap_or_else(|err| {
             panic!(
                 "failed to open bundled bubblewrap {}: {err}",
                 self.program.as_path().display()
             )
         });
-        let verification = if self.require_digest {
+        let verification = if self.mcp_console_companion {
             verify_required_mcp_console_companion(&bwrap_file, self.program.as_path())
         } else {
             verify_digest(&bwrap_file, expected_sha256(), self.program.as_path())
@@ -82,6 +82,10 @@ impl BundledBwrapLauncher {
         if let Err(err) = verification {
             eprintln!("{err}");
             std::process::exit(crate::BUNDLED_BWRAP_DIGEST_VERIFICATION_FAILURE_EXIT_CODE);
+        }
+
+        if self.mcp_console_companion {
+            argv.insert(1, "--mcp-console-release-monitor-streams".to_string());
         }
 
         make_files_inheritable(&preserved_files);
