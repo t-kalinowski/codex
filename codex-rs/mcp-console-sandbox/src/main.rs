@@ -103,6 +103,12 @@ fn main() {
 }
 
 async fn run(args: Args, mut endpoints: PassedStreamEndpoints) -> anyhow::Result<()> {
+    let runner_executable = std::env::current_exe()
+        .map_err(|error| anyhow::anyhow!("could not resolve runner executable: {error}"))?;
+    anyhow::ensure!(
+        runner_executable.to_str().is_some(),
+        "runner executable path must be valid Unicode"
+    );
     anyhow::ensure!(
         args.state_dir.is_absolute(),
         "application state directory must be absolute"

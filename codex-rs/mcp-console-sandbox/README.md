@@ -233,6 +233,9 @@ terminal-device isolation and rejects `isolate_host_devices`.
 - Windows setup and target launch are unsupported in this patch.
 - Linux does not project interrupt or graceful termination through the
   bubblewrap session boundary; its graceful deadlines must be zero.
+- Linux reports a signal death through bubblewrap's conventional `128 + signal`
+  exit code, and PID-namespace teardown may retire descendants with the target
+  root before a `root_exited` grace phase is externally observable.
 - Managed SOCKS UDP, explicit local-port exceptions, managed CA/TLS
   interception, non-loopback proxy listeners, credential brokerage, secrets,
   header injection, approvals, and interactive network elicitation are not

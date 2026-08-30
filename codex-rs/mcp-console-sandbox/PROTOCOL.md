@@ -364,12 +364,16 @@ Supported Unix launches use one private ready gate:
 This bridge is infrastructure, not an application-stream relay or a second
 sandbox implementation. Direct invocation outside the selected native sandbox
 fails before target execution. The native wrapper's wait status projects the
-target exit status. macOS uses the root process group for direct interrupts,
-while termination and retirement use the exact identities in the complete
-observed tree across process-group and session changes. Linux uses the
-release's bubblewrap PID/session namespaces and helper, plus an outer process
-group and parent-death signal. Descendants are observed after root exit and
-retired at bounded deadlines under the capabilities claimed by discovery.
+target exit status. On Linux, bubblewrap represents a signal death as the
+conventional `128 + signal` exit code. macOS uses the root process group for
+direct interrupts, while termination and retirement use the exact identities
+in the complete observed tree across process-group and session changes. Linux
+uses the release's bubblewrap PID/session namespaces and helper, plus an outer
+process group and parent-death signal. The namespace retires session-escaping
+descendants when its root exits, so Linux may proceed directly from `running`
+to `retired` without an externally observable `root_exited` grace phase.
+Descendants are retired at bounded deadlines under the capabilities claimed by
+discovery.
 
 Linux stores synthetic-mount registry data under
 `<state-dir>/bwrap-synthetic-mount-registry`. The helper alias and exact

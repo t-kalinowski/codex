@@ -1874,11 +1874,19 @@ fn lifecycle_reports_exit_signal_interrupt_and_bounded_retirement() {
         /*expected_code*/ 17,
         /*expected_signal*/ None,
     );
+    #[cfg(target_os = "macos")]
     assert_lifecycle_target(
         &["signal", "15"],
         /*expected_kind*/ None,
         /*expected_code*/ 0,
         Some(15),
+    );
+    #[cfg(target_os = "linux")]
+    assert_lifecycle_target(
+        &["signal", "15"],
+        Some("exited"),
+        128 + libc::SIGTERM,
+        /*expected_signal*/ None,
     );
 
     let target = fixture_target(&["sleep", "10000"]);
@@ -2501,6 +2509,7 @@ fn macos_terminate_after_root_exit_reaches_a_detached_descendant() {
     assert_processes_exit(&[descendant_process_id], std::time::Duration::from_secs(2));
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn target_output_reaches_eof_during_root_exit_grace() {
     let target = fixture_target(&["spawn-descendant-and-sleep", "10000", "100"]);
@@ -2582,7 +2591,42 @@ fn target_output_reaches_eof_during_root_exit_grace() {
 
 #[cfg(target_os = "linux")]
 #[test]
-fn linux_session_escaping_descendant_survives_grace_before_forced_retirement() {
+fn linux_target_output_reaches_eof_when_the_pid_namespace_retires() {
+    let target = fixture_target(&["spawn-descendant-and-sleep", "10000", "100"]);
+    let (mut runner, io) = Runner::spawn(&target, &[], /*with_io*/ true);
+    let mut io = io.expect("target streams");
+    let mut launch = default_launch(
+        /*id*/ 935,
+        std::env::current_dir()
+            .expect("current directory")
+            .as_path(),
+        json!([]),
+        json!({ "mode": "denied" }),
+        passed_streams(),
+    );
+    launch["launch"]["lifecycle"]["root_exit_grace_ms"] = json!(2500);
+    launch["launch"]["lifecycle"]["force_timeout_ms"] = json!(2000);
+    let response = runner.request(launch);
+    assert_eq!(response["type"], "launch_accepted", "{response}");
+    drop(io.stdin);
+
+    let mut descendant_process_id = [0_u8; 4];
+    io.stdout
+        .read_exact(&mut descendant_process_id)
+        .expect("read descendant process ID");
+    assert_ne!(u32::from_be_bytes(descendant_process_id), 0);
+
+    let outcome = runner.request(wait_request(/*id*/ 938));
+    assert_target_exit(&outcome, /*code*/ 0);
+    assert_eq!(outcome["outcome"]["retirement"]["complete"], true);
+    assert_eq!(outcome["outcome"]["retirement"]["forced"], false);
+    assert!(read_all(&mut io.stdout).is_empty());
+    assert!(read_all(&mut io.stderr).is_empty());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_pid_namespace_retires_a_session_escaping_descendant_with_the_root() {
     let target = fixture_target(&["spawn-session-escaping-descendant", "10000"]);
     let (mut runner, io) = Runner::spawn(&target, &[], /*with_io*/ true);
     let mut io = io.expect("target streams");
@@ -2600,39 +2644,16 @@ fn linux_session_escaping_descendant_survives_grace_before_forced_retirement() {
     let response = runner.request(launch);
     assert_eq!(response["type"], "launch_accepted", "{response}");
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    loop {
-        let status = runner.request(json!({
-            "type": "status",
-            "id": 941,
-            "protocol_version": support::PROTOCOL_VERSION,
-        }));
-        if status["status"]["phase"] == "root_exited" {
-            break;
-        }
-        assert_ne!(status["status"]["phase"], "retired", "{status}");
-        assert!(std::time::Instant::now() < deadline, "{status}");
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-
-    io.stdin
-        .write_all(b"D")
-        .expect("write to adopted descendant");
-    let mut echoed = [0_u8; 1];
-    io.stdout
-        .read_exact(&mut echoed)
-        .expect("adopted descendant survived root exit");
-    assert_eq!(echoed, *b"D");
-
     let outcome = runner.request(wait_request(/*id*/ 942));
     assert_target_exit(&outcome, /*code*/ 0);
     assert_eq!(outcome["outcome"]["retirement"]["complete"], true);
-    assert_eq!(outcome["outcome"]["retirement"]["forced"], true);
+    assert_eq!(outcome["outcome"]["retirement"]["forced"], false);
     assert_eq!(outcome["outcome"]["infrastructure"]["error"], Value::Null);
     assert_eq!(
         outcome["outcome"]["infrastructure"]["cleanup_error"],
         Value::Null
     );
+    assert!(io.stdin.write_all(b"D").is_err());
     assert!(read_all(&mut io.stdout).is_empty());
 }
 
