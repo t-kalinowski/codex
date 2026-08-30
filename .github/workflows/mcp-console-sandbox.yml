@@ -159,6 +159,19 @@ jobs:
                 host_read_only_denies_host_writes_without_creating_the_file
           fi
 
+      - name: Validate static Linux companion
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          env \
+            "LIBCAP_STATIC=1" \
+            cargo build --locked -p codex-bwrap --bin bwrap --release
+          if ldd "${CARGO_TARGET_DIR}/release/bwrap" | grep -q 'libcap\.so'; then
+            echo "LIBCAP_STATIC=1 produced a dynamic libcap dependency" >&2
+            exit 1
+          fi
+
       - name: Check for a clean worktree
         if: always() && !cancelled()
         uses: ./.github/actions/check-clean-worktree
