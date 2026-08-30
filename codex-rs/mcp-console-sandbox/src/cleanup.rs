@@ -118,6 +118,8 @@ impl Drop for CleanupDirectory {
 }
 
 fn identity(metadata: &std::fs::Metadata) -> DirectoryIdentity {
+    #[cfg(not(unix))]
+    let _ = metadata;
     DirectoryIdentity {
         #[cfg(unix)]
         device: metadata.dev(),
