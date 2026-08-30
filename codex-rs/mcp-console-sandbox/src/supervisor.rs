@@ -505,43 +505,62 @@ async fn wait_child(child: &mut Child) -> std::io::Result<TargetOutcome> {
 #[cfg(target_os = "macos")]
 async fn observe_child_without_reaping(process_id: u32) -> std::io::Result<TargetOutcome> {
     tokio::task::spawn_blocking(move || {
-        let mut information = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
-        let result = unsafe {
-            libc::waitid(
-                libc::P_PID,
+        loop {
+            let information = wait_for_child_notification(
                 process_id,
-                information.as_mut_ptr(),
-                libc::WEXITED | libc::WNOWAIT,
-            )
-        };
-        if result == -1 {
-            return Err(std::io::Error::last_os_error());
-        }
-        let information = unsafe { information.assume_init() };
-        let status = information.si_status;
-        match information.si_code {
-            libc::CLD_EXITED => Ok(TargetOutcome {
-                kind: TargetOutcomeKind::Exited,
-                code: Some(i64::from(status)),
-                signal: None,
-                error: None,
-            }),
-            libc::CLD_KILLED | libc::CLD_DUMPED => Ok(TargetOutcome {
-                kind: TargetOutcomeKind::Signaled,
-                code: None,
-                signal: Some(status),
-                error: None,
-            }),
-            code => Ok(TargetOutcome {
-                kind: TargetOutcomeKind::Unknown,
-                code: None,
-                signal: None,
-                error: Some(format!("target returned unrecognized wait code {code}")),
-            }),
+                libc::WEXITED | libc::WSTOPPED | libc::WCONTINUED | libc::WNOWAIT,
+            )?;
+            let status = information.si_status;
+            match information.si_code {
+                libc::CLD_EXITED => {
+                    return Ok(TargetOutcome {
+                        kind: TargetOutcomeKind::Exited,
+                        code: Some(i64::from(status)),
+                        signal: None,
+                        error: None,
+                    });
+                }
+                libc::CLD_KILLED | libc::CLD_DUMPED => {
+                    return Ok(TargetOutcome {
+                        kind: TargetOutcomeKind::Signaled,
+                        code: None,
+                        signal: Some(status),
+                        error: None,
+                    });
+                }
+                libc::CLD_STOPPED => {
+                    wait_for_child_notification(process_id, libc::WSTOPPED | libc::WNOHANG)?;
+                }
+                libc::CLD_CONTINUED => {
+                    wait_for_child_notification(process_id, libc::WCONTINUED | libc::WNOHANG)?;
+                }
+                code => {
+                    return Ok(TargetOutcome {
+                        kind: TargetOutcomeKind::Unknown,
+                        code: None,
+                        signal: None,
+                        error: Some(format!("target returned unrecognized wait code {code}")),
+                    });
+                }
+            }
         }
     })
     .await
     .map_err(std::io::Error::other)?
+}
+
+#[cfg(target_os = "macos")]
+fn wait_for_child_notification(
+    process_id: u32,
+    options: libc::c_int,
+) -> std::io::Result<libc::siginfo_t> {
+    let mut information = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
+    let result =
+        unsafe { libc::waitid(libc::P_PID, process_id, information.as_mut_ptr(), options) };
+    if result == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(unsafe { information.assume_init() })
 }
 
 fn target_observation(
