@@ -109,6 +109,8 @@ fn main() {
         Some("signal-disposition") => signal_disposition(parse_i32(arguments.next())),
         #[cfg(target_os = "macos")]
         Some("signal-aware-sleep") => signal_aware_sleep(parse_u64(arguments.next())),
+        #[cfg(target_os = "macos")]
+        Some("stop-then-exit") => stop_then_exit(parse_i32(arguments.next())),
         _ => Err(format!("unknown fixture operation: {operation:?}")),
     };
     if let Err(error) = result {
@@ -774,6 +776,18 @@ fn signal_aware_sleep(milliseconds: u64) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     std::thread::sleep(Duration::from_millis(milliseconds));
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn stop_then_exit(code: i32) -> Result<(), String> {
+    std::io::stdout()
+        .write_all(b"R")
+        .and_then(|()| std::io::stdout().flush())
+        .map_err(|error| error.to_string())?;
+    if unsafe { libc::raise(libc::SIGSTOP) } == -1 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    std::process::exit(code)
 }
 
 fn ready_then_wait() -> Result<(), String> {

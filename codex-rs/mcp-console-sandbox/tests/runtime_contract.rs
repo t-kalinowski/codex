@@ -2396,6 +2396,39 @@ fn macos_runner_recovers_from_lifetime_manager_crash() {
 
 #[cfg(target_os = "macos")]
 #[test]
+fn macos_stop_notification_does_not_replace_the_target_exit() {
+    let target = fixture_target(&["stop-then-exit", "86"]);
+    let (mut runner, io) = Runner::spawn(&target, &[], /*with_io*/ true);
+    let mut io = io.expect("target streams");
+    let response = runner.request(default_launch(
+        /*id*/ 9281,
+        std::env::current_dir()
+            .expect("current directory")
+            .as_path(),
+        json!([]),
+        json!({ "mode": "denied" }),
+        passed_streams(),
+    ));
+    assert_eq!(response["type"], "launch_accepted", "{response}");
+    let root_process_id = response["root_process_id"]
+        .as_i64()
+        .and_then(|process_id| libc::pid_t::try_from(process_id).ok())
+        .expect("macOS root process ID");
+    let runner_process_id = libc::pid_t::try_from(runner.process_id()).expect("runner process ID");
+    let mut ready = [0];
+    io.stdout.read_exact(&mut ready).expect("target readiness");
+    assert_eq!(ready, *b"R");
+    wait_for_process_status(root_process_id, libc::SSTOP);
+    assert_eq!(unsafe { libc::kill(root_process_id, libc::SIGCONT) }, 0);
+
+    assert_target_exit(&runner.request(wait_request(/*id*/ 9282)), /*code*/ 86);
+    runner.close_control();
+    wait_for_process_status(runner_process_id, libc::SZOMB);
+    assert!(runner.wait_for_exit().success());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
 fn macos_control_loss_recovers_from_an_unresponsive_lifetime_manager() {
     let target = fixture_target(&["spawn-session-escaping-descendant-and-wait", "10000"]);
     let (mut runner, io) = Runner::spawn(&target, &[], /*with_io*/ true);
@@ -3021,6 +3054,37 @@ fn wait_for_manager_process(runner_process_id: u32, root_process_id: libc::pid_t
         assert!(
             std::time::Instant::now() < deadline,
             "lifetime manager did not start"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn wait_for_process_status(process_id: libc::pid_t, expected: u32) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+        let size = unsafe {
+            libc::proc_pidinfo(
+                process_id,
+                libc::PROC_PIDTBSDINFO,
+                1,
+                info.as_mut_ptr().cast(),
+                std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int,
+            )
+        };
+        assert_eq!(
+            size as usize,
+            std::mem::size_of::<libc::proc_bsdinfo>(),
+            "inspect process {process_id}: {}",
+            std::io::Error::last_os_error()
+        );
+        if unsafe { info.assume_init() }.pbi_status == expected {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "process {process_id} did not reach status {expected}"
         );
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
