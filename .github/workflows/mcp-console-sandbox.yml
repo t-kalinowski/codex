@@ -23,7 +23,7 @@ jobs:
           - name: macOS
             runner: macos-14
           - name: Windows compile
-            runner: windows-2022
+            runner: windows-2025
     defaults:
       run:
         working-directory: codex-rs
