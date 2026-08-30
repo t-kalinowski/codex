@@ -13,7 +13,6 @@ use std::net::TcpListener;
 #[cfg(target_os = "macos")]
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStringExt;
-#[cfg(target_os = "macos")]
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use support::Runner;
@@ -911,16 +910,14 @@ fn host_read_only_denies_host_writes_without_creating_the_file() {
         "blocked",
     ]);
     let (mut runner, _) = Runner::spawn(&target, &[], /*with_io*/ false);
-    assert_eq!(
-        runner.request(default_launch(
-            /*id*/ 69,
-            host_directory.path(),
-            json!([]),
-            json!({ "mode": "denied" }),
-            null_streams(),
-        ))["type"],
-        "launch_accepted"
-    );
+    let response = runner.request(default_launch(
+        /*id*/ 69,
+        host_directory.path(),
+        json!([]),
+        json!({ "mode": "denied" }),
+        null_streams(),
+    ));
+    assert_eq!(response["type"], "launch_accepted", "{response}");
     assert_target_exit(&runner.request(wait_request(/*id*/ 691)), /*code*/ 73);
     assert!(!attempted_write.exists());
 }
@@ -2753,6 +2750,57 @@ fn linux_pid_namespace_retires_a_session_escaping_descendant_with_the_root() {
     );
     assert!(io.stdin.write_all(b"D").is_err());
     assert!(read_all(&mut io.stdout).is_empty());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_runner_sigkill_retires_the_pid_namespace() {
+    let target = fixture_target(&["spawn-session-escaping-descendant-and-wait", "10000"]);
+    let (mut runner, io) = Runner::spawn(&target, &[], /*with_io*/ true);
+    let mut io = io.expect("target streams");
+    let response = runner.request(default_launch(
+        /*id*/ 943,
+        std::env::current_dir()
+            .expect("current directory")
+            .as_path(),
+        json!([]),
+        json!({ "mode": "denied" }),
+        passed_streams(),
+    ));
+    assert_eq!(response["type"], "launch_accepted", "{response}");
+
+    let mut descendant_process_id = [0_u8; 4];
+    io.stdout
+        .read_exact(&mut descendant_process_id)
+        .expect("read descendant process ID");
+    assert_ne!(u32::from_be_bytes(descendant_process_id), 0);
+
+    runner.signal(libc::SIGKILL);
+    assert_eq!(runner.wait_for_exit().signal(), Some(libc::SIGKILL));
+    drop(io.stdin);
+    let (stdout_sender, stdout_receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = read_all(&mut io.stdout);
+        let _ = stdout_sender.send(result);
+    });
+    let (stderr_sender, stderr_receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = read_all(&mut io.stderr);
+        let _ = stderr_sender.send(result);
+    });
+    let timeout = std::time::Duration::from_secs(2);
+    assert_eq!(
+        stdout_receiver
+            .recv_timeout(timeout)
+            .expect("target stdout did not reach EOF after runner SIGKILL"),
+        Vec::<u8>::new()
+    );
+    assert_eq!(
+        stderr_receiver
+            .recv_timeout(timeout)
+            .expect("target stderr did not reach EOF after runner SIGKILL"),
+        Vec::<u8>::new()
+    );
 }
 
 #[test]

@@ -577,7 +577,7 @@ impl Runner {
         self._process_id
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub fn signal(&self, signal: libc::c_int) {
         assert_eq!(
             unsafe { libc::kill(self._process_id as libc::pid_t, signal) },
