@@ -8,7 +8,6 @@ use codex_mcp_console_sandbox::framing::FrameError;
 use codex_mcp_console_sandbox::framing::read_frame;
 use codex_mcp_console_sandbox::framing::write_frame;
 use codex_mcp_console_sandbox::policy::validate_setup_support;
-use codex_mcp_console_sandbox::protocol::AcknowledgedOperation;
 use codex_mcp_console_sandbox::protocol::ClientRequest;
 use codex_mcp_console_sandbox::protocol::ErrorCode;
 use codex_mcp_console_sandbox::protocol::ErrorPhase;
@@ -16,9 +15,7 @@ use codex_mcp_console_sandbox::protocol::ProtocolError;
 use codex_mcp_console_sandbox::protocol::RunnerPhase;
 use codex_mcp_console_sandbox::protocol::RunnerStatus;
 use codex_mcp_console_sandbox::protocol::ServerResponse;
-use codex_mcp_console_sandbox::protocol::SetupCompletedOperation;
 use codex_mcp_console_sandbox::stdio::PassedStreamEndpoints;
-use std::time::Duration;
 
 #[cfg(unix)]
 use codex_mcp_console_sandbox::capabilities::BackendAvailabilityError;
@@ -41,8 +38,15 @@ use codex_mcp_console_sandbox::policy::validate_launch;
 #[cfg(unix)]
 use codex_mcp_console_sandbox::policy::validate_launch_support;
 #[cfg(unix)]
+use codex_mcp_console_sandbox::protocol::AcknowledgedOperation;
+#[cfg(unix)]
+use codex_mcp_console_sandbox::protocol::SetupCompletedOperation;
+#[cfg(unix)]
 use codex_mcp_console_sandbox::supervisor::Supervisor;
+#[cfg(unix)]
+use std::time::Duration;
 
+#[cfg(unix)]
 const MAX_CONTROL_WAIT_MS: u64 = 5 * 60 * 1000;
 
 pub(crate) async fn control_loop(
@@ -63,7 +67,7 @@ pub(crate) async fn control_loop(
                     frame_error_code(&error),
                     ErrorPhase::Protocol,
                     error.to_string(),
-                    generation_state(supervisor, cleanup_directory),
+                    generation_state(supervisor.is_some(), cleanup_directory),
                 );
                 let _ = write_frame(control, &response).await;
                 return Err(error.into());
@@ -81,7 +85,7 @@ pub(crate) async fn control_loop(
                         "protocol version {} is unsupported; this runner requires {PROTOCOL_VERSION}",
                         request.protocol_version()
                     ),
-                    generation_state(supervisor, cleanup_directory),
+                    generation_state(supervisor.is_some(), cleanup_directory),
                 ),
             )
             .await?;
@@ -188,13 +192,13 @@ async fn handle_request(
             #[cfg(windows)]
             {
                 let _ = (launch, args, state_dir, supervisor, endpoints);
-                return error_response(
+                error_response(
                     Some(id),
                     ErrorCode::UnsupportedPlatform,
                     ErrorPhase::Validation,
                     "Windows sandbox launch is deferred in this release".to_string(),
                     TargetState::NotStarted,
-                );
+                )
             }
             #[cfg(unix)]
             {
@@ -344,74 +348,83 @@ async fn handle_request(
         }
         ClientRequest::Interrupt { .. } => {
             #[cfg(windows)]
-            return invalid_state(id, cleanup_directory.is_none());
+            {
+                invalid_state(id, cleanup_directory.is_none())
+            }
             #[cfg(unix)]
-            match supervisor.as_ref() {
-                None => invalid_state(id, cleanup_directory.is_none()),
-                Some(_) if cfg!(target_os = "linux") => error_response(
-                    Some(id),
-                    ErrorCode::UnsupportedPolicy,
-                    ErrorPhase::Running,
-                    "interrupt cannot cross this release's Linux bubblewrap session boundary"
-                        .to_string(),
-                    TargetState::Started,
-                ),
-                Some(supervisor) => match supervisor.interrupt() {
-                    Ok(()) => ServerResponse::Acknowledged {
-                        id,
-                        operation: AcknowledgedOperation::Interrupt,
-                    },
-                    Err(error) => error_response(
+            {
+                match supervisor.as_ref() {
+                    None => invalid_state(id, cleanup_directory.is_none()),
+                    Some(_) if cfg!(target_os = "linux") => error_response(
                         Some(id),
-                        ErrorCode::InvalidState,
+                        ErrorCode::UnsupportedPolicy,
                         ErrorPhase::Running,
-                        error.to_string(),
+                        "interrupt cannot cross this release's Linux bubblewrap session boundary"
+                            .to_string(),
                         TargetState::Started,
                     ),
-                },
+                    Some(supervisor) => match supervisor.interrupt() {
+                        Ok(()) => ServerResponse::Acknowledged {
+                            id,
+                            operation: AcknowledgedOperation::Interrupt,
+                        },
+                        Err(error) => error_response(
+                            Some(id),
+                            ErrorCode::InvalidState,
+                            ErrorPhase::Running,
+                            error.to_string(),
+                            TargetState::Started,
+                        ),
+                    },
+                }
             }
         }
         ClientRequest::Terminate { deadlines, .. } => {
             #[cfg(windows)]
-            return invalid_state(id, cleanup_directory.is_none());
+            {
+                let _ = deadlines;
+                invalid_state(id, cleanup_directory.is_none())
+            }
             #[cfg(unix)]
-            match supervisor.as_ref() {
-                None => invalid_state(id, cleanup_directory.is_none()),
-                Some(supervisor) => {
-                    if deadlines.graceful_ms > MAX_CONTROL_WAIT_MS
-                        || deadlines.force_ms > MAX_CONTROL_WAIT_MS
-                    {
-                        error_response(
-                            Some(id),
-                            ErrorCode::InvalidRequest,
-                            ErrorPhase::Validation,
-                            format!(
-                                "termination deadlines must not exceed {MAX_CONTROL_WAIT_MS} ms"
-                            ),
-                            TargetState::Started,
-                        )
-                    } else if cfg!(target_os = "linux") && deadlines.graceful_ms != 0 {
-                        error_response(
-                            Some(id),
-                            ErrorCode::UnsupportedPolicy,
-                            ErrorPhase::Running,
-                            "graceful termination is unsupported by the selected native backend"
-                                .to_string(),
-                            TargetState::Started,
-                        )
-                    } else {
-                        match supervisor.terminate(deadlines) {
-                            Ok(()) => ServerResponse::Acknowledged {
-                                id,
-                                operation: AcknowledgedOperation::Terminate,
-                            },
-                            Err(error) => error_response(
+            {
+                match supervisor.as_ref() {
+                    None => invalid_state(id, cleanup_directory.is_none()),
+                    Some(supervisor) => {
+                        if deadlines.graceful_ms > MAX_CONTROL_WAIT_MS
+                            || deadlines.force_ms > MAX_CONTROL_WAIT_MS
+                        {
+                            error_response(
                                 Some(id),
-                                ErrorCode::InvalidState,
-                                ErrorPhase::Running,
-                                error.to_string(),
+                                ErrorCode::InvalidRequest,
+                                ErrorPhase::Validation,
+                                format!(
+                                    "termination deadlines must not exceed {MAX_CONTROL_WAIT_MS} ms"
+                                ),
                                 TargetState::Started,
-                            ),
+                            )
+                        } else if cfg!(target_os = "linux") && deadlines.graceful_ms != 0 {
+                            error_response(
+                                Some(id),
+                                ErrorCode::UnsupportedPolicy,
+                                ErrorPhase::Running,
+                                "graceful termination is unsupported by the selected native backend"
+                                    .to_string(),
+                                TargetState::Started,
+                            )
+                        } else {
+                            match supervisor.terminate(deadlines) {
+                                Ok(()) => ServerResponse::Acknowledged {
+                                    id,
+                                    operation: AcknowledgedOperation::Terminate,
+                                },
+                                Err(error) => error_response(
+                                    Some(id),
+                                    ErrorCode::InvalidState,
+                                    ErrorPhase::Running,
+                                    error.to_string(),
+                                    TargetState::Started,
+                                ),
+                            }
                         }
                     }
                 }
@@ -422,30 +435,35 @@ async fn handle_request(
             ..
         } => {
             #[cfg(windows)]
-            return invalid_state(id, cleanup_directory.is_none());
+            {
+                let _ = retirement_timeout_ms;
+                invalid_state(id, cleanup_directory.is_none())
+            }
             #[cfg(unix)]
-            match supervisor.as_ref() {
-                None => invalid_state(id, cleanup_directory.is_none()),
-                Some(_) if retirement_timeout_ms > MAX_CONTROL_WAIT_MS => error_response(
-                    Some(id),
-                    ErrorCode::InvalidRequest,
-                    ErrorPhase::Validation,
-                    format!("wait timeout must not exceed {MAX_CONTROL_WAIT_MS} ms"),
-                    TargetState::Started,
-                ),
-                Some(supervisor) => match supervisor
-                    .wait(Duration::from_millis(retirement_timeout_ms))
-                    .await
-                {
-                    Ok(outcome) => ServerResponse::Final { id, outcome },
-                    Err(error) => error_response(
+            {
+                match supervisor.as_ref() {
+                    None => invalid_state(id, cleanup_directory.is_none()),
+                    Some(_) if retirement_timeout_ms > MAX_CONTROL_WAIT_MS => error_response(
                         Some(id),
-                        ErrorCode::CleanupFailed,
-                        ErrorPhase::Retirement,
-                        error.to_string(),
+                        ErrorCode::InvalidRequest,
+                        ErrorPhase::Validation,
+                        format!("wait timeout must not exceed {MAX_CONTROL_WAIT_MS} ms"),
                         TargetState::Started,
                     ),
-                },
+                    Some(supervisor) => match supervisor
+                        .wait(Duration::from_millis(retirement_timeout_ms))
+                        .await
+                    {
+                        Ok(outcome) => ServerResponse::Final { id, outcome },
+                        Err(error) => error_response(
+                            Some(id),
+                            ErrorCode::CleanupFailed,
+                            ErrorPhase::Retirement,
+                            error.to_string(),
+                            TargetState::Started,
+                        ),
+                    },
+                }
             }
         }
     }
@@ -459,6 +477,7 @@ fn idle_status() -> RunnerStatus {
     }
 }
 
+#[cfg(unix)]
 fn failed_status() -> RunnerStatus {
     RunnerStatus {
         phase: RunnerPhase::Failed,
@@ -468,10 +487,10 @@ fn failed_status() -> RunnerStatus {
 }
 
 fn generation_state(
-    supervisor: &Option<ActiveSupervisor>,
+    supervisor_started: bool,
     cleanup_directory: &Option<CleanupDirectory>,
 ) -> TargetState {
-    TargetState::from(supervisor.is_some() || cleanup_directory.is_none())
+    TargetState::from(supervisor_started || cleanup_directory.is_none())
 }
 
 fn invalid_state(id: u64, generation_consumed: bool) -> ServerResponse {
