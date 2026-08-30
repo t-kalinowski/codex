@@ -29,7 +29,6 @@ pub(crate) struct PreparedCommand {
     pub(crate) launch_status: crate::launch_bridge::LaunchStatus,
     pub(crate) launch_status_writer: std::os::fd::OwnedFd,
     pub(crate) sandbox_canary: crate::launch_bridge::SandboxCanary,
-    #[cfg(target_os = "macos")]
     pub(crate) _target_arguments: std::fs::File,
 }
 
@@ -64,7 +63,7 @@ pub(crate) fn prepare_command(
             argument
                 .to_str()
                 .map(str::to_owned)
-                .context("target arguments must be valid Unicode in protocol version 1")
+                .context("sandbox launch bridge arguments must be valid Unicode")
         })
         .collect::<Result<Vec<_>>>()?;
     let permissions =
@@ -151,7 +150,6 @@ pub(crate) fn prepare_command(
         launch_status: bridge.status,
         launch_status_writer: bridge.writer,
         sandbox_canary: bridge.canary,
-        #[cfg(target_os = "macos")]
         _target_arguments: bridge.target_arguments,
     })
 }

@@ -236,7 +236,7 @@ pub fn absolute_target(
     if path.to_str().is_none() {
         bail!("target executable path must be valid Unicode in protocol version 1")
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     if arguments.iter().any(|argument| argument.to_str().is_none()) {
         bail!("target arguments must be valid Unicode in protocol version 1")
     }

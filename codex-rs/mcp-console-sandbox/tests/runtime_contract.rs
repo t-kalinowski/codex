@@ -1764,9 +1764,8 @@ fn inherited_terminal_streams_remain_terminals() {
     assert_target_exit(&runner.request(wait_request(/*id*/ 904)), /*code*/ 0);
 }
 
-#[cfg(target_os = "macos")]
 #[test]
-fn macos_preserves_non_unicode_target_arguments() {
+fn preserves_non_unicode_target_arguments() {
     let argument = OsString::from_vec(b"native-\xff-argument".to_vec());
     let mut target = fixture_target(&["argv"]);
     target.push(argument.clone());

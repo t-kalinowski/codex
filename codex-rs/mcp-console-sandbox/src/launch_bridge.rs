@@ -6,17 +6,13 @@ use anyhow::bail;
 use std::ffi::OsString;
 use std::fs::OpenOptions;
 use std::io::Read;
-#[cfg(target_os = "macos")]
 use std::io::Seek;
-#[cfg(target_os = "macos")]
 use std::io::SeekFrom;
 use std::io::Write;
 use std::os::fd::AsRawFd;
 use std::os::fd::FromRawFd;
 use std::os::fd::OwnedFd;
-#[cfg(target_os = "macos")]
 use std::os::unix::ffi::OsStrExt;
-#[cfg(target_os = "macos")]
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::OpenOptionsExt;
@@ -32,9 +28,7 @@ const MAX_STATUS_FRAME_SIZE: usize = 16 * 1024;
 const STATUS_READY: u8 = 0;
 const STATUS_EXEC_ERROR: u8 = 1;
 const GATE_RELEASED: u8 = 1;
-#[cfg(target_os = "macos")]
 const TARGET_ARGUMENTS_MAGIC: &[u8; 4] = b"MCA1";
-#[cfg(target_os = "macos")]
 const MAX_TARGET_ARGUMENT_BYTES: usize = 4 * 1024 * 1024;
 #[cfg(target_os = "macos")]
 const TARGET_SIGNALS: [libc::c_int; 3] = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP];
@@ -46,7 +40,6 @@ pub struct PreparedTargetBridge {
     pub gate: TargetStartGate,
     pub gate_reader: OwnedFd,
     pub canary: SandboxCanary,
-    #[cfg(target_os = "macos")]
     pub target_arguments: std::fs::File,
 }
 
@@ -148,40 +141,26 @@ pub fn prepare_target(
         .file
         .metadata()
         .context("inspect sandbox launch canary")?;
-    #[cfg(target_os = "macos")]
     let target_arguments = create_target_arguments(state_directory, target)?;
     #[cfg(target_os = "macos")]
     let inherited_signal_dispositions = inherited_ignored_signals()?;
+    let command = std::iter::once(executable.as_os_str().to_os_string()).chain([
+        OsString::from(PRIVATE_SWITCH),
+        OsString::from(status_writer.as_raw_fd().to_string()),
+        OsString::from(gate_reader.as_raw_fd().to_string()),
+        OsString::from(canary.file.as_raw_fd().to_string()),
+        canary.path.as_os_str().to_os_string(),
+        OsString::from(canary_metadata.dev().to_string()),
+        OsString::from(canary_metadata.ino().to_string()),
+        OsString::from(if require_seccomp { "1" } else { "0" }),
+        OsString::from(target_arguments.as_raw_fd().to_string()),
+    ]);
     #[cfg(target_os = "macos")]
-    let command = std::iter::once(executable.as_os_str().to_os_string())
-        .chain([
-            OsString::from(PRIVATE_SWITCH),
-            OsString::from(status_writer.as_raw_fd().to_string()),
-            OsString::from(gate_reader.as_raw_fd().to_string()),
-            OsString::from(canary.file.as_raw_fd().to_string()),
-            canary.path.as_os_str().to_os_string(),
-            OsString::from(canary_metadata.dev().to_string()),
-            OsString::from(canary_metadata.ino().to_string()),
-            OsString::from(if require_seccomp { "1" } else { "0" }),
-            OsString::from(target_arguments.as_raw_fd().to_string()),
-            OsString::from(inherited_signal_dispositions.to_string()),
-        ])
+    let command = command
+        .chain([OsString::from(inherited_signal_dispositions.to_string())])
         .collect();
     #[cfg(not(target_os = "macos"))]
-    let command = std::iter::once(executable.as_os_str().to_os_string())
-        .chain([
-            OsString::from(PRIVATE_SWITCH),
-            OsString::from(status_writer.as_raw_fd().to_string()),
-            OsString::from(gate_reader.as_raw_fd().to_string()),
-            OsString::from(canary.file.as_raw_fd().to_string()),
-            canary.path.as_os_str().to_os_string(),
-            OsString::from(canary_metadata.dev().to_string()),
-            OsString::from(canary_metadata.ino().to_string()),
-            OsString::from(if require_seccomp { "1" } else { "0" }),
-            OsString::from("--"),
-        ])
-        .chain(target.iter().cloned())
-        .collect();
+    let command = command.collect();
     Ok(PreparedTargetBridge {
         command,
         status: LaunchStatus {
@@ -193,7 +172,6 @@ pub fn prepare_target(
         },
         gate_reader,
         canary,
-        #[cfg(target_os = "macos")]
         target_arguments,
     })
 }
@@ -225,24 +203,15 @@ fn dispatch(mut arguments: impl Iterator<Item = OsString>) -> Result<()> {
         Some(value) if value == "1" => true,
         _ => bail!("launch bridge seccomp requirement is invalid"),
     };
-    #[cfg(target_os = "macos")]
     let target_arguments_fd = parse_descriptor(arguments.next(), "target arguments")?;
     #[cfg(target_os = "macos")]
     let inherited_signal_dispositions = parse_u64(arguments.next(), "signal dispositions")?;
-    #[cfg(target_os = "macos")]
     let target = {
         anyhow::ensure!(
             arguments.next().is_none(),
             "launch bridge received unexpected target arguments"
         );
         read_target_arguments(target_arguments_fd)?
-    };
-    #[cfg(not(target_os = "macos"))]
-    let target = {
-        if arguments.next().as_deref() != Some(std::ffi::OsStr::new("--")) {
-            bail!("launch bridge target separator is missing")
-        }
-        arguments.collect()
     };
     run(
         status_fd,
@@ -365,7 +334,6 @@ fn verify_sandbox(
     }
 }
 
-#[cfg(target_os = "macos")]
 fn create_target_arguments(state_directory: &Path, target: &[OsString]) -> Result<std::fs::File> {
     let template = state_directory.join("mcp-console-target-arguments-XXXXXX");
     let mut template = std::ffi::CString::new(template.as_os_str().as_bytes())
@@ -405,7 +373,6 @@ fn create_target_arguments(state_directory: &Path, target: &[OsString]) -> Resul
     Ok(file)
 }
 
-#[cfg(target_os = "macos")]
 fn read_target_arguments(descriptor: i32) -> Result<Vec<OsString>> {
     let mut file = unsafe { std::fs::File::from_raw_fd(descriptor) };
     set_close_on_exec(&file)?;

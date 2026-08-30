@@ -39,7 +39,6 @@ mod unix {
     use pretty_assertions::assert_eq;
     use std::ffi::OsString;
     use std::os::fd::AsRawFd;
-    #[cfg(target_os = "macos")]
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::ffi::OsStringExt;
     use std::os::unix::fs::MetadataExt;
@@ -300,7 +299,6 @@ mod unix {
         let metadata = canary.metadata().expect("inspect bridge canary");
         let marker = directory.path().join("target-started");
         let fixture = cargo_bin("mcp-console-sandbox-fixture").expect("fixture binary");
-        #[cfg(target_os = "macos")]
         let target_arguments = {
             use std::io::Seek;
 
@@ -325,13 +323,11 @@ mod unix {
         };
         let (_status_reader, status_writer) = UnixStream::pair().expect("status pair");
         let (gate_reader, _gate_writer) = UnixStream::pair().expect("gate pair");
-        #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
         let mut inherited = vec![
             status_writer.as_raw_fd(),
             gate_reader.as_raw_fd(),
             canary.as_raw_fd(),
         ];
-        #[cfg(target_os = "macos")]
         inherited.push(target_arguments.as_raw_fd());
         let mut command = Command::new(runner_executable.path());
         command
@@ -342,18 +338,10 @@ mod unix {
             .arg(&canary_path)
             .arg(metadata.dev().to_string())
             .arg(metadata.ino().to_string())
-            .arg("0");
+            .arg("0")
+            .arg(target_arguments.as_raw_fd().to_string());
         #[cfg(target_os = "macos")]
-        command
-            .arg(target_arguments.as_raw_fd().to_string())
-            .arg("0");
-        #[cfg(not(target_os = "macos"))]
-        command
-            .arg("--")
-            .arg(fixture)
-            .arg("write")
-            .arg(&marker)
-            .arg("started");
+        command.arg("0");
         apply_sanitized_environment(&mut command, &[]);
         unsafe {
             command.pre_exec(move || {
@@ -524,19 +512,10 @@ mod unix {
             stream_spec_null(),
             json!({ "mode": "denied" }),
         ));
-        #[cfg(target_os = "macos")]
-        {
-            assert_eq!(response["type"], "launch_accepted", "{response}");
-            let outcome = runner.request(wait_request(/*id*/ 34));
-            assert_eq!(outcome["type"], "final", "{outcome}");
-            assert_eq!(outcome["outcome"]["target"]["code"], 0);
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            assert_eq!(response["type"], "error");
-            assert_eq!(response["error"]["code"], "invalid_request");
-            assert_eq!(response["error"]["target_started"], false);
-        }
+        assert_eq!(response["type"], "launch_accepted", "{response}");
+        let outcome = runner.request(wait_request(/*id*/ 34));
+        assert_eq!(outcome["type"], "final", "{outcome}");
+        assert_eq!(outcome["outcome"]["target"]["code"], 0);
     }
 
     #[test]

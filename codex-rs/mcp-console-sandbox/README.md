@@ -138,10 +138,11 @@ reserved, but nonempty stream-handle lists fail while Windows launch is
 deferred.
 
 The target program and arguments follow `--`. The runner never invokes a shell
-and does not resolve bare executable names. On macOS the private launch bridge
-preserves native target-path and argument bytes through an inherited
-descriptor. JSON policy paths and environment names and values remain Unicode
-in protocol version 1.
+and does not resolve bare executable names. The private launch bridge preserves
+native target argument bytes through an inherited descriptor on macOS and
+Linux. It also preserves native target-path bytes on macOS; Linux target paths
+must be Unicode. JSON policy paths and environment names and values remain
+Unicode in protocol version 1.
 
 The caller then:
 
@@ -248,8 +249,9 @@ terminal-device isolation and rejects `isolate_host_devices`.
 - Managed Unix-socket allow rules and configurable loopback/local binding are
   available only where discovery reports them (currently macOS). Unix-socket
   deny rules are unsupported.
-- On macOS native target paths and arguments may be non-Unicode. Protocol
-  environment values and JSON paths remain Unicode in version 1.
+- Native target arguments may be non-Unicode on macOS and Linux. Native target
+  paths may be non-Unicode on macOS; Linux target paths, protocol environment
+  values, and JSON paths remain Unicode in version 1.
 - Arbitrary Seatbelt/SBPL or other backend policy text is not accepted.
 
 See [PROTOCOL.md](PROTOCOL.md) for the wire contract and [REBASE.md](REBASE.md)

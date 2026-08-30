@@ -187,9 +187,10 @@ add native black-box tests before advertising support.
 - The release's `codex-sandboxing` dependency graph still compiles shared
   Windows/client/telemetry support on Unix. The runner does not initialize it;
   feature-gating that existing graph would broaden this rolling patch.
-- macOS preserves native target program and argument bytes through the private
-  launch bridge. Environment names and values, application state paths, and
-  JSON policy paths remain Unicode in version 1.
+- macOS and Linux preserve native target argument bytes through the private
+  launch bridge. macOS also preserves native target program paths; Linux target
+  paths, environment names and values, application state paths, and JSON policy
+  paths remain Unicode in version 1.
 - Host terminal-device isolation is unsupported.
 - Linux interrupt and graceful termination are unsupported.
 - Linux does not expose configurable loopback denial or Unix-socket policy;

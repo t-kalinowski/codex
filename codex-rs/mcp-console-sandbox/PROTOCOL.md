@@ -31,10 +31,11 @@ target can execute.
 
 The target follows `--` and never passes through JSON or a shell. Its program
 must be an absolute executable path. Bare names and `PATH` lookup are not
-supported. On macOS the private launch bridge carries the target program and
-arguments as native bytes through an inherited descriptor, preserving
-non-Unicode values. JSON policy paths and environment names and values remain
-Unicode in protocol version 1.
+supported. The private launch bridge carries target arguments as native bytes
+through an inherited descriptor on macOS and Linux, preserving non-Unicode
+values. macOS carries the target program through the same descriptor; Linux
+requires its path to be Unicode. JSON policy paths and environment names and
+values remain Unicode in protocol version 1.
 
 `--state-dir` must be an absolute Unicode path. The runner creates and
 canonicalizes it. It belongs to the embedding application, not Codex.
