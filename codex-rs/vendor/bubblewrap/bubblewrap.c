@@ -1,6 +1,8 @@
 /* bubblewrap
  * Copyright (C) 2016 Alexander Larsson
  * SPDX-License-Identifier: LGPL-2.0-or-later
+ * Modified for MCP Console on 2026-08-30 to add private monitor-stream
+ * release behavior.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
