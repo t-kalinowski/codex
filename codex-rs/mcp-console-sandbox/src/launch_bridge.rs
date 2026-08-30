@@ -498,13 +498,13 @@ fn verify_linux_sandbox(require_seccomp: bool) -> Result<()> {
         unsafe { libc::getppid() } == 1,
         "launch bridge is outside the bubblewrap PID namespace"
     );
-    let no_new_privileges = unsafe { libc::prctl(libc::PR_GET_NO_NEW_PRIVS) };
+    let no_new_privileges = unsafe { libc::prctl(libc::PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) };
     anyhow::ensure!(
         no_new_privileges == 1,
         "launch bridge is missing Linux no_new_privs confinement"
     );
     if require_seccomp {
-        let seccomp = unsafe { libc::prctl(libc::PR_GET_SECCOMP) };
+        let seccomp = unsafe { libc::prctl(libc::PR_GET_SECCOMP, 0, 0, 0, 0) };
         anyhow::ensure!(
             seccomp == libc::SECCOMP_MODE_FILTER as libc::c_int,
             "launch bridge is missing the required Linux seccomp filter"
