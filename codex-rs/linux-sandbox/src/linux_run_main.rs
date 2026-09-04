@@ -40,7 +40,6 @@ use codex_sandboxing::landlock::CODEX_LINUX_SANDBOX_ARG0;
 
 static BWRAP_CHILD_PID: AtomicI32 = AtomicI32::new(0);
 static PENDING_FORWARDED_SIGNAL: AtomicI32 = AtomicI32::new(0);
-static SYNTHETIC_MOUNT_REGISTRY_ROOT: OnceLock<PathBuf> = OnceLock::new();
 
 const FORWARDED_SIGNALS: &[libc::c_int] =
     &[libc::SIGHUP, libc::SIGINT, libc::SIGQUIT, libc::SIGTERM];
@@ -145,18 +144,6 @@ pub struct LandlockCommand {
     #[arg(long = "no-proc", default_value_t = false)]
     pub no_proc: bool,
 
-    /// Private embedding override for synthetic-mount bookkeeping.
-    #[arg(long = "mcp-console-state-root", hide = true)]
-    pub mcp_console_state_root: Option<PathBuf>,
-
-    /// Private embedding requirement for the exact adjacent bubblewrap companion.
-    #[arg(
-        long = "mcp-console-bundled-bwrap",
-        hide = true,
-        default_value_t = false
-    )]
-    pub mcp_console_bundled_bwrap: bool,
-
     /// Full command args to run under the Linux sandbox helper.
     #[arg(trailing_var_arg = true)]
     pub command: Vec<String>,
@@ -180,23 +167,8 @@ pub fn run_main() -> ! {
         proxy_route_spec,
         verify_fd_mounts,
         no_proc,
-        mcp_console_state_root,
-        mcp_console_bundled_bwrap,
         command,
     } = LandlockCommand::parse();
-
-    if let Some(root) = mcp_console_state_root {
-        assert!(
-            root.is_absolute(),
-            "MCP Console synthetic mount state root must be absolute"
-        );
-        SYNTHETIC_MOUNT_REGISTRY_ROOT
-            .set(root)
-            .unwrap_or_else(|_| panic!("MCP Console synthetic mount state root was set twice"));
-    }
-    if mcp_console_bundled_bwrap {
-        crate::launcher::require_mcp_console_bundled_bwrap();
-    }
 
     if command.is_empty() {
         panic!("No command specified to execute.");
@@ -280,9 +252,6 @@ pub fn run_main() -> ! {
             exec_or_panic(command);
         }
 
-        if crate::launcher::mcp_console_bundled_bwrap_required() {
-            release_target_streams_from_supervisor();
-        }
         let signal_forwarders = install_bwrap_signal_forwarders(command_pid);
         signal_mask.restore();
         loop {
@@ -339,7 +308,6 @@ pub fn run_main() -> ! {
             permission_profile: &permission_profile,
             allow_network_for_proxy,
             proxy_route_spec,
-            mcp_console_bundled_bwrap,
             command,
         });
         run_bwrap_with_proc_fallback(
@@ -629,9 +597,6 @@ fn run_bwrap_in_child_with_synthetic_mount_cleanup(bwrap_args: crate::bwrap::Bwr
         exec_bwrap(args, preserved_files);
     }
 
-    if crate::launcher::mcp_console_bundled_bwrap_required() {
-        release_target_streams_from_supervisor();
-    }
     close_child_exec_start_read(exec_start_pipe[0]);
     let protected_create_monitor = ProtectedCreateMonitor::start(&protected_create_targets);
     let signal_forwarders = install_bwrap_signal_forwarders(pid);
@@ -1369,7 +1334,9 @@ fn synthetic_mount_marker_dir(path: &Path) -> PathBuf {
 }
 
 pub(crate) fn synthetic_mount_registry_root() -> PathBuf {
-    SYNTHETIC_MOUNT_REGISTRY_ROOT
+    static REGISTRY_ROOT: OnceLock<PathBuf> = OnceLock::new();
+
+    REGISTRY_ROOT
         .get_or_init(|| {
             let effective_uid = unsafe { libc::geteuid() };
             let temp_dir = std::env::temp_dir();
@@ -1526,23 +1493,6 @@ fn close_fd_or_panic(fd: libc::c_int, context: &str) {
     }
 }
 
-fn release_target_streams_from_supervisor() {
-    let null_fd = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) };
-    if null_fd < 0 {
-        let err = std::io::Error::last_os_error();
-        panic!("open /dev/null for sandbox supervisor streams: {err}");
-    }
-    for fd in [libc::STDIN_FILENO, libc::STDOUT_FILENO, libc::STDERR_FILENO] {
-        if unsafe { libc::dup2(null_fd, fd) } < 0 {
-            let err = std::io::Error::last_os_error();
-            panic!("release target stream from sandbox supervisor: {err}");
-        }
-    }
-    if null_fd > libc::STDERR_FILENO {
-        close_fd_or_panic(null_fd, "close sandbox supervisor null stream");
-    }
-}
-
 fn is_proc_mount_failure(stderr: &str) -> bool {
     stderr.contains("Can't mount proc")
         && stderr.contains("/newroot/proc")
@@ -1557,7 +1507,6 @@ struct InnerSeccompCommandArgs<'a> {
     permission_profile: &'a PermissionProfile,
     allow_network_for_proxy: bool,
     proxy_route_spec: Option<String>,
-    mcp_console_bundled_bwrap: bool,
     command: Vec<String>,
 }
 
@@ -1569,7 +1518,6 @@ fn build_inner_seccomp_command(args: InnerSeccompCommandArgs<'_>) -> Vec<String>
         permission_profile,
         allow_network_for_proxy,
         proxy_route_spec,
-        mcp_console_bundled_bwrap,
         command,
     } = args;
     let current_exe = match std::env::current_exe() {
@@ -1595,9 +1543,6 @@ fn build_inner_seccomp_command(args: InnerSeccompCommandArgs<'_>) -> Vec<String>
         permission_profile_json,
         "--apply-seccomp-then-exec".to_string(),
     ]);
-    if mcp_console_bundled_bwrap {
-        inner.push("--mcp-console-bundled-bwrap".to_string());
-    }
     if allow_network_for_proxy {
         inner.push("--allow-network-for-proxy".to_string());
         let proxy_route_spec = proxy_route_spec

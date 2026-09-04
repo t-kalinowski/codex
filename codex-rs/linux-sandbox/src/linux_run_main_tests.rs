@@ -517,7 +517,6 @@ fn managed_proxy_inner_command_includes_route_spec() {
         permission_profile: &permission_profile,
         allow_network_for_proxy: true,
         proxy_route_spec: Some("{\"routes\":[]}".to_string()),
-        mcp_console_bundled_bwrap: false,
         command: vec!["/bin/true".to_string()],
     });
 
@@ -534,7 +533,6 @@ fn inner_command_includes_permission_profile_flag() {
         permission_profile: &permission_profile,
         allow_network_for_proxy: false,
         proxy_route_spec: None,
-        mcp_console_bundled_bwrap: false,
         command: vec!["/bin/true".to_string()],
     });
 
@@ -554,7 +552,6 @@ fn non_managed_inner_command_omits_route_spec() {
         permission_profile: &permission_profile,
         allow_network_for_proxy: false,
         proxy_route_spec: None,
-        mcp_console_bundled_bwrap: false,
         command: vec!["/bin/true".to_string()],
     });
 
@@ -571,7 +568,6 @@ fn managed_proxy_inner_command_requires_route_spec() {
             permission_profile: &permission_profile,
             allow_network_for_proxy: true,
             proxy_route_spec: None,
-            mcp_console_bundled_bwrap: false,
             command: vec!["/bin/true".to_string()],
         })
     });

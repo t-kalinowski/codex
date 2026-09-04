@@ -19,73 +19,30 @@ use sha2::Sha256;
 
 const SHA256_HEX_LEN: usize = 64;
 const NULL_SHA256_DIGEST: [u8; 32] = [0; 32];
-const MAX_MCP_CONSOLE_BWRAP_SIZE: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BundledBwrapLauncher {
     program: AbsolutePathBuf,
-    mcp_console_companion: bool,
 }
 
 pub(crate) fn launcher() -> Option<BundledBwrapLauncher> {
     let current_exe = std::env::current_exe().ok()?;
     find_for_install_context(InstallContext::current())
         .or_else(|| find_legacy_for_exe(&current_exe))
-        .map(|program| BundledBwrapLauncher {
-            program,
-            mcp_console_companion: false,
-        })
-}
-
-pub(crate) fn mcp_console_launcher() -> Option<BundledBwrapLauncher> {
-    let current_exe = std::env::current_exe().ok()?;
-    let program = current_exe.parent()?.join("codex-resources/bwrap");
-    is_executable_file(&program).then(|| BundledBwrapLauncher {
-        program: AbsolutePathBuf::from_absolute_path(&program).unwrap_or_else(|err| {
-            panic!(
-                "failed to normalize bundled bubblewrap path {}: {err}",
-                program.display()
-            )
-        }),
-        mcp_console_companion: true,
-    })
-}
-
-pub(crate) fn verify_mcp_console_companion() -> Result<(), String> {
-    let launcher = mcp_console_launcher().ok_or_else(|| {
-        "required bubblewrap companion is not an executable file at the exact relative path \
-         codex-resources/bwrap"
-            .to_string()
-    })?;
-    let file = File::open(launcher.program.as_path()).map_err(|err| {
-        format!(
-            "failed to open bubblewrap companion {}: {err}",
-            launcher.program.as_path().display()
-        )
-    })?;
-    verify_required_mcp_console_companion(&file, launcher.program.as_path())
+        .map(|program| BundledBwrapLauncher { program })
 }
 
 impl BundledBwrapLauncher {
-    pub(crate) fn exec(&self, mut argv: Vec<String>, preserved_files: Vec<File>) -> ! {
+    pub(crate) fn exec(&self, argv: Vec<String>, preserved_files: Vec<File>) -> ! {
         let bwrap_file = File::open(self.program.as_path()).unwrap_or_else(|err| {
             panic!(
                 "failed to open bundled bubblewrap {}: {err}",
                 self.program.as_path().display()
             )
         });
-        let verification = if self.mcp_console_companion {
-            verify_required_mcp_console_companion(&bwrap_file, self.program.as_path())
-        } else {
-            verify_digest(&bwrap_file, expected_sha256(), self.program.as_path())
-        };
-        if let Err(err) = verification {
+        if let Err(err) = verify_digest(&bwrap_file, expected_sha256(), self.program.as_path()) {
             eprintln!("{err}");
             std::process::exit(crate::BUNDLED_BWRAP_DIGEST_VERIFICATION_FAILURE_EXIT_CODE);
-        }
-
-        if self.mcp_console_companion {
-            argv.insert(1, "--mcp-console-release-monitor-streams".to_string());
         }
 
         make_files_inheritable(&preserved_files);
@@ -166,35 +123,6 @@ fn expected_sha256() -> Option<[u8; 32]> {
             .unwrap_or_else(|err| panic!("invalid CODEX_BWRAP_SHA256 value: {err}"));
         (digest != NULL_SHA256_DIGEST).then_some(digest)
     })
-}
-
-fn required_mcp_console_sha256() -> Result<[u8; 32], String> {
-    expected_sha256().ok_or_else(|| {
-        "mcp-console-sandbox was built without the required CODEX_BWRAP_SHA256 companion digest"
-            .to_string()
-    })
-}
-
-fn verify_required_mcp_console_companion(file: &File, path: &Path) -> Result<(), String> {
-    let metadata = file.metadata().map_err(|err| {
-        format!(
-            "failed to inspect bubblewrap companion {}: {err}",
-            path.display()
-        )
-    })?;
-    if !metadata.is_file() {
-        return Err(format!(
-            "bubblewrap companion is not a regular file: {}",
-            path.display()
-        ));
-    }
-    if metadata.len() > MAX_MCP_CONSOLE_BWRAP_SIZE {
-        return Err(format!(
-            "bubblewrap companion {} exceeds {MAX_MCP_CONSOLE_BWRAP_SIZE} bytes",
-            path.display()
-        ));
-    }
-    verify_digest(file, Some(required_mcp_console_sha256()?), path)
 }
 
 fn verify_digest(file: &File, expected: Option<[u8; 32]>, path: &Path) -> Result<(), String> {
