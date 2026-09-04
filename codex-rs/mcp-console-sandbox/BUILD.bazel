@@ -1,20 +1,56 @@
-load("//:defs.bzl", "codex_rust_crate")
+load("@crates//:defs.bzl", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_test")
 
-# Cargo runs build.rs to stamp Git builds. Bazel stamps each generated binary
-# directly through codex_rust_crate, so it must not run the Cargo-only script.
-codex_rust_crate(
-    name = "mcp-console-sandbox-lib",
-    build_script_enabled = False,
-    crate_name = "codex_mcp_console_sandbox",
-    extra_binaries_non_windows = [
-        "//codex-rs/bwrap:bwrap",
+filegroup(
+    name = "package-files",
+    srcs = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+rust_binary(
+    name = "mcp-console-sandbox",
+    srcs = glob(["src/*.rs"]),
+    crate_root = "src/main.rs",
+    edition = "2024",
+    visibility = ["//visibility:public"],
+    deps = all_crate_deps(),
+)
+
+rust_binary(
+    name = "mcp-console-sandbox-fixture",
+    srcs = ["src/bin/mcp_console_sandbox_fixture.rs"],
+    edition = "2024",
+    deps = all_crate_deps(),
+)
+
+rust_test(
+    name = "bootstrap-contract-test",
+    srcs = [
+        "src/codex.rs",
+        "tests/bootstrap_contract.rs",
     ],
-    rustc_env = {
-        "CARGO_PKG_VERSION": "0.150.1",
-    },
-    test_tags = [
-        "manual",
-        "mcp-console-sandbox-config-required",
-        "no-sandbox",
-    ],
+    crate_root = "tests/bootstrap_contract.rs",
+    data = [
+        ":mcp-console-sandbox",
+        ":mcp-console-sandbox-fixture",
+    ] + select({
+        "@platforms//os:linux": ["//codex-rs/bwrap"],
+        "//conditions:default": [],
+    }),
+    edition = "2024",
+    env = {
+        "CARGO_BIN_EXE_mcp-console-sandbox": "$(rlocationpath :mcp-console-sandbox)",
+        "CARGO_BIN_EXE_mcp-console-sandbox-fixture": "$(rlocationpath :mcp-console-sandbox-fixture)",
+    } | select({
+        "@platforms//os:linux": {"CARGO_BIN_EXE_bwrap": "$(rlocationpath //codex-rs/bwrap:bwrap)"},
+        "//conditions:default": {},
+    }),
+    tags = ["no-sandbox"],
+    deps = all_crate_deps(
+        normal = True,
+        normal_dev = True,
+    ),
 )

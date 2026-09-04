@@ -3615,7 +3615,6 @@ name = "codex-mcp-console-sandbox"
 version = "0.150.1"
 dependencies = [
  "anyhow",
- "clap",
  "codex-linux-sandbox",
  "codex-network-proxy",
  "codex-protocol",
@@ -3623,15 +3622,12 @@ dependencies = [
  "codex-utils-absolute-path",
  "codex-utils-cargo-bin",
  "codex-utils-path-uri",
- "codex-utils-pty",
  "libc",
  "pretty_assertions",
  "serde",
  "serde_json",
  "tempfile",
- "thiserror 2.0.18",
  "tokio",
- "windows-sys 0.52.0",
 ]
 
 [[package]]

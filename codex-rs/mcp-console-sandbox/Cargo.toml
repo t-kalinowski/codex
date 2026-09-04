@@ -4,12 +4,6 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-build = "build.rs"
-
-[lib]
-name = "codex_mcp_console_sandbox"
-path = "src/lib.rs"
-doctest = false
 
 [[bin]]
 name = "mcp-console-sandbox"
@@ -26,32 +20,23 @@ bench = false
 [lints]
 workspace = true
 
-[dependencies]
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 anyhow = { workspace = true }
-clap = { workspace = true, features = ["derive"] }
 codex-network-proxy = { workspace = true }
 codex-protocol = { workspace = true }
 codex-sandboxing = { workspace = true }
 codex-utils-absolute-path = { workspace = true }
 codex-utils-path-uri = { workspace = true }
-codex-utils-pty = { workspace = true }
+libc = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-thiserror = { workspace = true }
-tokio = { workspace = true, features = ["fs", "io-util", "macros", "process", "rt-multi-thread", "sync", "time"] }
-
-[target.'cfg(unix)'.dependencies]
-libc = { workspace = true }
+tokio = { workspace = true, features = ["rt", "process"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 codex-linux-sandbox = { workspace = true }
 
-[target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { version = "0.52", features = [
-    "Win32_Foundation",
-] }
-
 [dev-dependencies]
 codex-utils-cargo-bin = { workspace = true }
 pretty_assertions = { workspace = true }
+serde_json = { workspace = true }
 tempfile = { workspace = true }
