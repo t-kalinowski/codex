@@ -33,7 +33,7 @@ Stdin tests queue `[length][JSON][sentinel]` together for sentinel sizes from 1 
 
 Linux tests exercise host selection and the ordinary bundled fallback through an executable probe of the native helper selection, including a host without `--argv0`. The leaf keeps its actual executable path in `argv[0]` and dispatches the native helper's leading `--sandbox-policy-cwd` option. This supplies the release's legacy-bwrap re-exec path without a temporary command alias or a change to native selection. macOS checks the ordinary profile by allowing `hw.ncpu` and denying `kern.boottime`. Environment tests compare the complete target result with a direct native launch, including platform runtime additions such as `__CF_USER_TEXT_ENCODING`.
 
-The focused workflow tests macOS and checks a release executable. macOS is the compatibility gate; Linux and Windows compatibility are outside this task's final scope. There is no special hash staging, static-libcap check, discovery call, or lifecycle protocol smoke test.
+The focused workflow retains the macOS job and adds an Ubuntu 24.04 Linux job. Linux runs all executable contracts against debug and release runner/bubblewrap pairs, the native sandbox suites without exclusions, the Bazel executable contract, and focused lint checks. The shared CI setup supplies namespace prerequisites. Windows remains outside scope. There is no special hash staging, static-libcap check, discovery call, or lifecycle protocol smoke test.
 
 ## Unchanged native test failures
 
@@ -50,29 +50,66 @@ not permitted`. The runner patch does not change these tests or their policy. Th
 
 On macOS, all 15 executable contract tests passed through `just test`, with retries disabled, and all 15 passed through Bazel. The locked offline Cargo build also passed. Nextest reported no leaks in the final run. An earlier concurrent run had a Nextest `LEAK` label on the test that retains the caller's stdin; its assertions passed, and an isolated run and the final full run did not report it. No supervision or timeout workaround was added.
 
-Before the compatibility scope was narrowed to macOS, the retained Linux path passed 17 executable contracts, 207 native sandbox tests, and focused Clippy. Those results do not expand this patch's macOS compatibility commitment.
+Before the compatibility scope was narrowed to macOS, the retained Linux path passed 17 executable contracts, 207 native sandbox tests, and focused Clippy. Those are preliminary results; they do not replace validation on the current Linux host.
 
 `just fix -p codex-mcp-console-sandbox`, `just fmt`, the workspace Rust format check, focused Clippy with all targets and features and warnings denied, the argument-comment lint, and the focused workflow's Actionlint check passed. `just bazel-lock-update` completed without changing `MODULE.bazel.lock`; the Cargo lockfile changes no external dependency versions. `git diff --check` passed.
 
+## Linux validation on 2026-09-07
+
+The local host is Ubuntu 24.04.4 LTS, x86_64, kernel `6.8.0-139-generic`, glibc 2.39, and GCC 13.3.0. The workspace toolchain is Rust/Cargo 1.95.0, with Nextest 0.9.103, just 1.51.0, Bazel 9.0.0, and Actionlint 1.7.12. The host `/usr/bin/bwrap` is Ubuntu's bubblewrap 0.9.0. Cargo metadata resolves the target directory to `/home/tomasz/github/t-kalinowski/codex/codex-rs/target`.
+
+The initial host has `kernel.unprivileged_userns_clone=1`, `user.max_user_namespaces=256081`, and `kernel.apparmor_restrict_unprivileged_userns=1`. A direct `unshare --user --map-root-user --mount --pid --fork true` fails writing `/proc/self/uid_map` with `Operation not permitted`. No process seccomp filter is active. The ordinary Cargo bwrap build also reports missing libcap development headers/pkg-config metadata. Installing `libcap-dev` and enabling namespace operations are host prerequisites, not runner changes.
+
+| Local check                                        | Result                                                                 |
+| -------------------------------------------------- | ---------------------------------------------------------------------- |
+| Locked debug and release runner builds             | Passed.                                                                |
+| Native sandbox test binary build                   | Passed.                                                                |
+| Ordinary Cargo bwrap build                         | Blocked by missing `libcap-dev`.                                       |
+| Bazel executable contract, initial restricted host | Build passed; 4 contracts passed and 13 failed during namespace setup. |
+| Cargo executable/native suites and release pair    | Pending host prerequisites.                                            |
+| Focused workflow Actionlint                        | Passed.                                                                |
+
+Bazel's failures include `setting up uid map: Permission denied` and `loopback: Failed RTM_NEWADDR: Operation not permitted`. These agree with the direct namespace probe. They do not establish a runner defect or justify a native policy change or Linux test exclusion. Hosted CI has not run for these new commits; no push or workflow dispatch was performed.
+
+`just fix -p codex-mcp-console-sandbox`, `just fmt`, `cargo fmt --all -- --check`, focused Clippy with all targets/features and `-D warnings`, the argument-comment lint, Actionlint, and `git diff --check` passed locally. The packaged argument-comment linter emits unknown-lint warnings while checking upstream dependencies; it reports no leaf finding. No Rust changes resulted from fix/format.
+
+The runtime source, executable contracts, Bazel rules, and native policy remain unchanged. The residual existing-upstream-file audit above still contains only workspace membership and generated Cargo lock state. No dependencies changed during the Linux work, so no lockfile regeneration is needed.
+
 ## Updating to another release
 
-Start a new release branch and review the native interfaces before carrying forward the leaf and workflow. Keep the two workspace changes separate from leaf behavior. Regenerate Cargo and Bazel lock state after dependencies are settled, inspect every existing-file modification, and run the native and executable checks on macOS. Other platform compatibility needs separate work.
+Start a new release branch and review the native interfaces before carrying forward the leaf and workflow. Keep the two workspace changes separate from leaf behavior. Regenerate Cargo and Bazel lock state after dependencies are settled, inspect every existing-file modification, and run the native and executable checks on both Linux and macOS. Windows compatibility remains outside scope.
 
-```console
+For Linux, first establish the prerequisites in [README.md](README.md), then run the following from the repository root. Resolve the target directory instead of assuming `target/`:
+
+```sh
 git diff --name-status 90854393966b21e9ebfd21b122334eb09a20c93d...HEAD
 cd codex-rs
-just test -p codex-mcp-console-sandbox
-just test -p codex-sandboxing
-cargo clippy -p codex-mcp-console-sandbox --all-targets --all-features -- -D warnings
+cargo build --locked -p codex-bwrap --bin bwrap
+sandbox_target_dir="$(cargo metadata --locked --format-version=1 --no-deps |
+  python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')"
+env "CARGO_BIN_EXE_bwrap=$sandbox_target_dir/debug/bwrap" \
+  just test -p codex-mcp-console-sandbox --retries 0
+env "PATH=$sandbox_target_dir/debug:$PATH" \
+  "CARGO_BIN_EXE_bwrap=$sandbox_target_dir/debug/bwrap" \
+  just test -p codex-sandboxing -p codex-linux-sandbox -p codex-bwrap --retries 0
+cargo build --locked --release \
+  -p codex-mcp-console-sandbox --bin mcp-console-sandbox \
+  -p codex-bwrap --bin bwrap
+env "CARGO_BIN_EXE_mcp-console-sandbox=$sandbox_target_dir/release/mcp-console-sandbox" \
+  "CARGO_BIN_EXE_bwrap=$sandbox_target_dir/release/bwrap" \
+  just test -p codex-mcp-console-sandbox --retries 0
 cd ..
-just bazel-lock-update
 bazel test //codex-rs/mcp-console-sandbox:bootstrap-contract-test
+just argument-comment-lint -p codex-mcp-console-sandbox
+cd codex-rs
 just fix -p codex-mcp-console-sandbox
 just fmt
-cd codex-rs
 cargo fmt --all -- --check
+cargo clippy -p codex-mcp-console-sandbox --all-targets --all-features -- -D warnings
 cd ..
 git diff --check
 ```
 
-On Linux, also build and test `codex-bwrap` and test `codex-linux-sandbox`. Put the built debug bwrap on `PATH` for native tests: one unchanged test uses the host executable as a bundled fixture, which requires bundled capabilities. The runner contracts separately exercise suitable, unsuitable, missing, and no-`--argv0` host executables. Do not carry native policy relaxations or lifecycle machinery into the next release. A native limitation should remain explicit rather than acquire a second implementation in the leaf.
+After dependency changes, also run `just bazel-lock-update` from the repository root and inspect the generated lockfiles. On macOS, omit the Linux helper packages and retain exactly the two native test exclusions listed above. Run the complete executable suite and the existing macOS release smoke test. Do not rerun functional tests merely because fix/format ran.
+
+Put the built debug bwrap on `PATH` only for the native tests: one unchanged test uses the host executable as a bundled fixture, which requires bundled capabilities. The runner contracts separately exercise suitable, unsuitable, missing, and no-`--argv0` host executables. Do not carry native policy relaxations or lifecycle machinery into the next release. A native limitation should remain explicit rather than acquire a second implementation in the leaf.

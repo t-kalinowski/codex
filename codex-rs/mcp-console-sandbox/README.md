@@ -16,7 +16,7 @@ See [PROTOCOL.md](PROTOCOL.md) for the complete request and a runnable caller.
 
 ## Platforms and packaging
 
-macOS is the compatibility target and CI gate for this patch. Linux and Windows compatibility are outside the current scope. The existing native Linux path is retained, with no additional backend lifecycle layer.
+The focused workflow has separate Linux and macOS jobs. macOS compatibility is validated; local Linux runtime validation is pending the host prerequisites recorded in [REBASE.md](REBASE.md). Windows compatibility remains outside scope. Both platform paths use the release's native sandbox behavior.
 
 | Platform                    | Behavior                                                                                                                         |
 | --------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
@@ -30,24 +30,38 @@ The fixture binary is only a test target. It is not a runtime companion.
 
 ## Build and validation
 
-Use the release's toolchain, workspace dependencies, and lockfile:
+Use the release's Rust 1.95.0 toolchain, workspace dependencies, and lockfile. On Linux, building the ordinary bundled bubblewrap requires a C toolchain, `pkg-config`, and libcap development headers and libraries. On Ubuntu, install these with:
+
+```console
+sudo apt-get install -y build-essential pkg-config libcap-dev
+```
+
+Build the Linux release pair and resolve Cargo's actual output directory:
 
 ```console
 cd codex-rs
-cargo build --locked -p codex-mcp-console-sandbox --bin mcp-console-sandbox --release
+cargo build --locked --release \
+  -p codex-mcp-console-sandbox --bin mcp-console-sandbox \
+  -p codex-bwrap --bin bwrap
+sandbox_target_dir="$(cargo metadata --locked --format-version=1 --no-deps |
+  python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')"
 ```
 
-For a Linux installation that also supplies the ordinary bundled fallback:
+Stage `$sandbox_target_dir/release/mcp-console-sandbox` and `$sandbox_target_dir/release/bwrap` together when supplying the fallback. The ordinary Cargo helper links to the system libcap; the destination needs its runtime library. On macOS, build only the runner with `cargo build --locked -p codex-mcp-console-sandbox --bin mcp-console-sandbox --release`.
 
-```console
-cargo build --locked -p codex-bwrap --bin bwrap --release
-```
-
-Stage `target/release/mcp-console-sandbox` and, if needed, `target/release/bwrap` together. Bazel builds the executable with `bazel build //codex-rs/mcp-console-sandbox:mcp-console-sandbox`; no workspace status configuration or source-revision stamp is required.
+Bazel builds the executable with `bazel build //codex-rs/mcp-console-sandbox:mcp-console-sandbox`. No workspace status configuration or source-revision stamp is required.
 
 Build tools do not send application telemetry to OpenAI. Cargo, Bazel, rustup, and CI actions may download dependencies and tools when they are not cached. Once dependencies are available, a Cargo build can use `--locked --offline`.
 
-For local tests, build the ordinary debug bwrap on Linux, then run `just test -p codex-mcp-console-sandbox`. The Bazel equivalent is `bazel test //codex-rs/mcp-console-sandbox:bootstrap-contract-test`. [REBASE.md](REBASE.md) records native test limitations and the rolling patch.
+For Linux Cargo tests, build the ordinary debug helper before running the executable suite:
+
+```console
+cargo build --locked -p codex-bwrap --bin bwrap
+env "CARGO_BIN_EXE_bwrap=$sandbox_target_dir/debug/bwrap" \
+  just test -p codex-mcp-console-sandbox --retries 0
+```
+
+The Bazel equivalent is `bazel test //codex-rs/mcp-console-sandbox:bootstrap-contract-test`; its test data supplies the runner, fixture, and ordinary bundled helper. The focused Linux CI job also runs the native sandbox suites and the entire executable suite against the release runner and release bubblewrap. The macOS job retains its existing coverage and two native test exclusions. [REBASE.md](REBASE.md) records local results, complete validation commands, and the rolling patch audit. Hosted CI results are separate from local validation.
 
 ## Runtime telemetry and network
 
@@ -77,7 +91,15 @@ Linux's native routing rewrites proxy endpoint ports for the target network name
 
 ## Native limitations
 
-Linux requires the release's kernel and namespace prerequisites, including kernel 5.11 or newer for the bubblewrap path and permission to create user namespaces. There is no automatic legacy-Landlock or unsandboxed fallback. Filesystem policies must allow the executable and runtime files needed by the native sandbox path. Upstream policy kinds retain their upstream meaning.
+Linux requires kernel 5.11 or newer for the bubblewrap path, user namespaces with UID/GID mappings, mount and PID namespaces, and network namespaces for restricted or proxy-managed networking. Host security policy must permit these operations. A basic prerequisite probe is:
+
+```console
+unshare --user --map-root-user --mount --net --pid --fork true
+```
+
+Ubuntu's AppArmor restrictions can block unprivileged namespace setup even when `kernel.unprivileged_userns_clone=1` and `user.max_user_namespaces` is nonzero. Errors such as `setting up uid map: Permission denied` or `loopback: Failed RTM_NEWADDR: Operation not permitted` can reflect that host restriction. The repository's shared Linux CI setup enables user namespaces and removes that restriction on its CI runner. Containers also need permission to perform native namespace operations.
+
+There is no automatic legacy-Landlock or unsandboxed fallback. Filesystem policies must allow the executable and runtime files needed by the native sandbox path. Upstream policy kinds retain their upstream meaning. Native seccomp restrictions on Unix sockets also remain unchanged; inheriting a socket as a standard stream does not exempt its operations from those rules.
 
 The ordinary macOS profile retains its existing sysctl, Mach-service, terminal, and filesystem restrictions. Applications that needed the removed custom allowances may now fail under those same native restrictions.
 
