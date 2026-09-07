@@ -56,24 +56,32 @@ Before the compatibility scope was narrowed to macOS, the retained Linux path pa
 
 ## Linux validation on 2026-09-07
 
-The local host is Ubuntu 24.04.4 LTS, x86_64, kernel `6.8.0-139-generic`, glibc 2.39, and GCC 13.3.0. The workspace toolchain is Rust/Cargo 1.95.0, with Nextest 0.9.103, just 1.51.0, Bazel 9.0.0, and Actionlint 1.7.12. The host `/usr/bin/bwrap` is Ubuntu's bubblewrap 0.9.0. Cargo metadata resolves the target directory to `/home/tomasz/github/t-kalinowski/codex/codex-rs/target`.
+The local host is Ubuntu 24.04.4 LTS, x86_64, kernel `6.8.0-139-generic`, glibc 2.39, and GCC 13.3.0. The workspace toolchain is Rust/Cargo 1.95.0, with Nextest 0.9.103, just 1.51.0, Bazel 9.0.0, and Actionlint 1.7.12. The host `/usr/bin/bwrap` is Ubuntu's bubblewrap 0.9.0; libcap is 2.66. Cargo metadata resolves the target directory to `/home/tomasz/github/t-kalinowski/codex/codex-rs/target`. Successful suite runs used the ordinary host user, UID 1000, outside a container.
 
-The initial host has `kernel.unprivileged_userns_clone=1`, `user.max_user_namespaces=256081`, and `kernel.apparmor_restrict_unprivileged_userns=1`. A direct `unshare --user --map-root-user --mount --pid --fork true` fails writing `/proc/self/uid_map` with `Operation not permitted`. No process seccomp filter is active. The ordinary Cargo bwrap build also reports missing libcap development headers/pkg-config metadata. Installing `libcap-dev` and enabling namespace operations are host prerequisites, not runner changes.
+The initial host had `kernel.unprivileged_userns_clone=1`, `user.max_user_namespaces=256081`, and `kernel.apparmor_restrict_unprivileged_userns=1`. A direct namespace probe failed writing `/proc/self/uid_map` with `Operation not permitted`. The ordinary Cargo bwrap build also reported missing libcap development headers/pkg-config metadata. After installing `libcap-dev` and setting `kernel.apparmor_restrict_unprivileged_userns=0`, the full `unshare --user --map-root-user --mount --net --pid --fork true` probe passed. No process seccomp filter was active before native sandbox launch.
 
-| Local check                                        | Result                                                                 |
-| -------------------------------------------------- | ---------------------------------------------------------------------- |
-| Locked debug and release runner builds             | Passed.                                                                |
-| Native sandbox test binary build                   | Passed.                                                                |
-| Ordinary Cargo bwrap build                         | Blocked by missing `libcap-dev`.                                       |
-| Bazel executable contract, initial restricted host | Build passed; 4 contracts passed and 13 failed during namespace setup. |
-| Cargo executable/native suites and release pair    | Pending host prerequisites.                                            |
-| Focused workflow Actionlint                        | Passed.                                                                |
+The initial Bazel build passed, but 13 of 17 contracts failed during namespace setup, including `setting up uid map: Permission denied` and `loopback: Failed RTM_NEWADDR: Operation not permitted`. Those errors cleared after host setup without changing the runner or native policies. The existing 17 Cargo executable contracts and 207 native tests then passed before the test-harness correction below.
 
-Bazel's failures include `setting up uid map: Permission denied` and `loopback: Failed RTM_NEWADDR: Operation not permitted`. These agree with the direct namespace probe. They do not establish a runner defect or justify a native policy change or Linux test exclusion. Hosted CI has not run for these new commits; no push or workflow dispatch was performed.
+### Concurrent executable staging
 
-`just fix -p codex-mcp-console-sandbox`, `just fmt`, `cargo fmt --all -- --check`, focused Clippy with all targets/features and `-D warnings`, the argument-comment lint, Actionlint, and `git diff --check` passed locally. The packaged argument-comment linter emits unknown-lint warnings while checking upstream dependencies; it reports no leaf finding. No Rust changes resulted from fix/format.
+Bazel's shared test process exposed a Linux test-harness race: a launch could fail with `Text file busy` when a concurrent fork inherited another thread's writable binary-copy descriptor. Close-on-exec does not release that descriptor until the child execs. The new public executable regression, `concurrent_launches_preserve_independent_input`, starts eight callers together and checks four distinct 8,193-byte inputs per caller. It failed in all five Bazel repetitions before the correction.
 
-The runtime source, executable contracts, Bazel rules, and native policy remain unchanged. The residual existing-upstream-file audit above still contains only workspace membership and generated Cargo lock state. No dependencies changed during the Linux work, so no lockfile regeneration is needed.
+Linux test staging now runs each binary copy through `cp` and waits for that process to finish. Writable executable descriptors stay out of the test process and therefore cannot reach its concurrently forked launchers. This applies to the runner, ordinary bundled bwrap, and host-selection fixtures. The tests remain concurrent. No runtime code, native descriptor policy, or retry behavior changed.
+
+| Local check                                                                | Result                                                                        |
+| -------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| Locked ordinary debug bwrap and release runner/bwrap builds                | Passed; both Cargo bwrap artifacts dynamically link `libcap.so.2`.            |
+| Debug executable contracts                                                 | 18 passed, 0 skipped, retries disabled.                                       |
+| Native `codex-sandboxing`, `codex-linux-sandbox`, and `codex-bwrap` suites | 207 passed, 0 skipped, retries disabled; no Linux exclusions.                 |
+| Release runner plus release bwrap through all executable contracts         | 18 passed, 0 skipped, retries disabled.                                       |
+| Bazel executable contract, uncached, five repetitions                      | All five passed all 18 contracts: 90 passing executions.                      |
+| Release runner with system `PATH=/usr/bin:/bin`                            | Passed a 65,537-byte prequeued binary stdin round trip with host bwrap 0.9.0. |
+
+The five-run regression check used `bazel test --cache_test_results=no --runs_per_test=5 //codex-rs/mcp-console-sandbox:bootstrap-contract-test`. The ordinary debug/release/native commands are listed below. Cargo's release check explicitly supplied both `CARGO_BIN_EXE_mcp-console-sandbox` and `CARGO_BIN_EXE_bwrap`. The critical stdin boundaries, maximum JSON frame, open-stdin launch, complete environment comparison including native `PWD`, proxy allow/deny behavior, and final-target descriptor checks all remain covered. Nextest reported no leaks in the final executable runs.
+
+`just fix -p codex-mcp-console-sandbox`, `just fmt`, `cargo fmt --all -- --check`, focused Clippy with all targets/features and `-D warnings`, the argument-comment lint, Actionlint, and `git diff --check` passed locally. The packaged argument-comment linter emits unknown-lint warnings while checking upstream dependencies; it reports no leaf finding. The ordinary bwrap build retains GCC warnings in vendored C code. No native source or warning policy was changed.
+
+The runtime source, bootstrap protocol, Bazel rules, and native policies remain unchanged. The only Linux code correction is in the leaf's executable test harness. The residual existing-upstream-file audit above still contains only workspace membership and generated Cargo lock state. No dependencies changed during the Linux work, so no lockfile regeneration is needed. The macOS job and its two native exclusions are preserved. Hosted CI has not run for these new commits; no push or workflow dispatch was performed.
 
 ## Updating to another release
 

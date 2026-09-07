@@ -16,7 +16,7 @@ See [PROTOCOL.md](PROTOCOL.md) for the complete request and a runnable caller.
 
 ## Platforms and packaging
 
-The focused workflow has separate Linux and macOS jobs. macOS compatibility is validated; local Linux runtime validation is pending the host prerequisites recorded in [REBASE.md](REBASE.md). Windows compatibility remains outside scope. Both platform paths use the release's native sandbox behavior.
+Linux and macOS are supported and have separate jobs in the focused workflow. Both use the release's native sandbox behavior. Linux executable contracts are validated locally with debug, release, and Bazel builds; [REBASE.md](REBASE.md) records the environment and results. Windows compatibility remains outside scope.
 
 | Platform                    | Behavior                                                                                                                         |
 | --------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
