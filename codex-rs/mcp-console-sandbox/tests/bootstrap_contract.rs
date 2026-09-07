@@ -13,6 +13,7 @@ use std::io::Write;
 use std::net::TcpListener;
 use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
+use std::path::Path;
 use std::process::Command;
 use std::process::Output;
 use std::process::Stdio;
@@ -39,14 +40,28 @@ fn frame(request: &Value, input: &[u8]) -> Vec<u8> {
     bytes
 }
 
-fn runner(directory: &std::path::Path) -> Command {
+#[cfg(target_os = "linux")]
+fn copy_executable(from: &Path, to: &Path) {
+    // A concurrent fork can retain a writable copy descriptor until exec, even
+    // with CLOEXEC, and make another launch fail with ETXTBSY. Keep those
+    // descriptors in a separate copy process and wait for it to close them.
+    let output = Command::new("cp")
+        .arg("--")
+        .arg(from)
+        .arg(to)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+}
+
+fn runner(directory: &Path) -> Command {
     let executable = cargo_bin("mcp-console-sandbox").unwrap();
     #[cfg(target_os = "linux")]
     let executable = {
         // Exercise the ordinary sibling helper layout under Cargo and Bazel.
         let staged = directory.join("runner");
-        std::fs::copy(executable, &staged).unwrap();
-        std::fs::copy(cargo_bin("bwrap").unwrap(), directory.join("bwrap")).unwrap();
+        copy_executable(&executable, &staged);
+        copy_executable(&cargo_bin("bwrap").unwrap(), &directory.join("bwrap"));
         staged
     };
     #[cfg(not(target_os = "linux"))]
@@ -93,6 +108,27 @@ fn stdin_starts_immediately_after_bootstrap() {
         assert_eq!(output.stdout, sentinel, "size={size}");
         assert_eq!(output.stderr, b"");
     }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn concurrent_launches_preserve_independent_input() {
+    const LAUNCHERS: usize = 8;
+    let start = std::sync::Barrier::new(LAUNCHERS);
+    std::thread::scope(|scope| {
+        for launcher in 0..LAUNCHERS {
+            let start = &start;
+            scope.spawn(move || {
+                start.wait();
+                for sequence in 0..4 {
+                    let input = vec![(launcher * 4 + sequence) as u8; 8193];
+                    let output = run(frame(&fixture("stdout", &[]), &input));
+                    assert!(output.status.success(), "{output:?}");
+                    assert_eq!((output.stdout, output.stderr), (input, vec![]));
+                }
+            });
+        }
+    });
 }
 
 #[test]
@@ -363,11 +399,10 @@ fn linux_prefers_a_suitable_host_bwrap() {
     let command = runner(staging.path());
     let host = staging.path().join("host");
     std::fs::create_dir(&host).unwrap();
-    std::fs::copy(
-        cargo_bin("mcp-console-sandbox-fixture").unwrap(),
-        host.join("bwrap"),
-    )
-    .unwrap();
+    copy_executable(
+        &cargo_bin("mcp-console-sandbox-fixture").unwrap(),
+        &host.join("bwrap"),
+    );
     let mut request = request(&["/bin/echo", "target"]);
     request["environment"]["PATH"] = json!(host);
     let output = run_command(command, frame(&request, &[]));
@@ -384,11 +419,10 @@ fn linux_uses_the_ordinary_bundle_when_host_bwrap_is_missing_or_unsuitable() {
         let host = staging.path().join("host");
         std::fs::create_dir(&host).unwrap();
         if unsuitable {
-            std::fs::copy(
-                cargo_bin("mcp-console-sandbox-fixture").unwrap(),
-                host.join("bwrap"),
-            )
-            .unwrap();
+            copy_executable(
+                &cargo_bin("mcp-console-sandbox-fixture").unwrap(),
+                &host.join("bwrap"),
+            );
         }
         let mut request = request(&["/bin/echo", "target"]);
         request["environment"] = json!({"PATH": host, "TEST_BWRAP_UNSUITABLE": "1"});
@@ -406,11 +440,10 @@ fn linux_host_bwrap_without_argv0_can_reexec_the_native_helper() {
     let command = runner(staging.path());
     let host = staging.path().join("host");
     std::fs::create_dir(&host).unwrap();
-    std::fs::copy(
-        cargo_bin("mcp-console-sandbox-fixture").unwrap(),
-        host.join("bwrap"),
-    )
-    .unwrap();
+    copy_executable(
+        &cargo_bin("mcp-console-sandbox-fixture").unwrap(),
+        &host.join("bwrap"),
+    );
     let mut request = request(&["/bin/echo", "target"]);
     request["environment"] = json!({
         "PATH": host,
