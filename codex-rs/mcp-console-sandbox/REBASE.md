@@ -1,314 +1,78 @@
-# Rolling patch record
+# Rolling native sandbox extraction
 
-This file records the release base and the seams used by the private MCP
-Console sandbox runner. It is a reimplementation guide, not a request to merge
-this branch upstream.
+This branch is based on `rust-v0.150.1`, commit `90854393966b21e9ebfd21b122334eb09a20c93d`. The one-shot correction starts after `b4de42be4e329fd6df06e6755b99f37f4a7ff5c6`. Earlier commits remain in the history; the correction is expressed entirely as additional commits.
 
-## Release identity
+## Existing upstream files
 
-- Upstream release tag: `rust-v0.150.1`
-- Upstream base SHA: `90854393966b21e9ebfd21b122334eb09a20c93d`
-- Workspace version: `0.150.1`
-- Rust toolchain: `1.95.0`
-- Public executable: `mcp-console-sandbox`
-- Cargo package: `codex-mcp-console-sandbox`
-- Protocol version: `1`
+The final patch changes only these files that existed in the release base:
 
-The runner's discovery response records the final immutable patch commit, not
-only the upstream base. MCP Console must pin and build that final commit.
+| Exact path            | Why it remains modified                                                                                             | Why the leaf cannot avoid it                                                                            | Protection                                                                   | Expected rebase risk                                              |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| `codex-rs/Cargo.toml` | Registers the standalone package as a workspace member.                                                             | Workspace builds, dependency inheritance, and repository checks need membership.                        | Locked Cargo builds and executable contract tests; Bazel package resolution. | Low: a member-list insertion may conflict.                        |
+| `codex-rs/Cargo.lock` | Records the leaf package and refreshes workspace package versions from `0.0.0` to the release manifest's `0.150.1`. | Cargo resolves the whole workspace; the release lockfile itself predates those manifest version stamps. | `cargo metadata --offline`, locked builds, and `just bazel-lock-update`.     | Generated: resolve against the new release, then review the diff. |
 
-## Patch boundary
+No upstream visibility change is required. The release already exports `RawFileSystemSandboxPolicy`, its runtime conversion, `NetworkSandboxPolicy`, `PermissionProfile`, absolute paths, the default `SandboxManager`, the Linux helper entry point, and the managed proxy APIs needed by the executable.
 
-The patch adds one leaf crate at `codex-rs/mcp-console-sandbox`. No existing
-Codex crate depends on it, and no existing Codex application caller is routed
-through it. The executable protocol is the only downstream interface.
+The proxy bootstrap uses `RemoteNetworkProxyConfig`, the existing executor-local projection of `NetworkProxyConfig`. Its native constructor supplies static state without a custom reloader, credentials, sessions, listener negotiation, or duplicated policy types. `RemoteNetworkProxyLaunchConfig` and the native prepared sandbox context handle proxy launch and environment projection.
 
-The leaf crate owns:
+`src/codex.rs` is a private module, not a workspace crate or a public Rust API. The executable owns the bootstrap wrapper. All other added files are inside the leaf package or its focused workflow.
 
-- length-prefixed JSON framing and version 1 protocol types;
-- capability discovery and fail-closed request dispatch;
-- normalized filesystem/network policy validation;
-- native bootstrap endpoint ownership and direct standard streams;
-- one private Unix ready gate and bounded exec-error reporting;
-- native-confinement proof and runner-state canary denial before that bridge
-  reports ready;
-- target status, exact-identity descendant retirement, control-loss cleanup,
-  target-directory cleanup, and proxy shutdown;
-- executable black-box fixtures and contract tests;
-- build stamping and these three documentation files.
+## Restored release behavior
 
-It deliberately does not own platform policy construction, namespace setup,
-seccomp, Seatbelt text, bubblewrap implementation, or the managed proxy.
+The Linux seccomp deny rules, host-bwrap-first selection, ordinary bundled helper search, optional native digest verification, native synthetic-mount registry, vendored bubblewrap, and dynamic libcap build behavior match the release byte for byte. There is no private bubblewrap stream option.
 
-The private Unix launch bridge is release-local infrastructure. It verifies
-that Seatbelt is already active on macOS, or that the expected namespace,
-`no_new_privs`, and requested seccomp boundary is active on Linux. It also
-requires the normalized denial of a runner-owned state canary before reporting
-ready. Direct bridge invocation therefore fails before target execution.
+The Seatbelt manager, profiles, SBPL, and compile-data list match the release. The application-specific profile was deleted. The workspace-status script, leaf build script, and `.bazelrc` stamping configuration were removed.
 
-## Files outside the leaf crate
+The runner has no persistent protocol, stream bridge, supervisor, process-tree tracker, parent monitor, generation state, or application-directory ownership. The only explicit Tokio features are `rt` and `process`; the current-thread runtime also drives the features required transitively by the native proxy.
 
-The intended added or modified files outside the leaf crate are narrow:
+## Executable contract coverage
 
-| File | Reason |
-| --- | --- |
-| `.bazelrc` | Add the opt-in `mcp-console-sandbox` workspace-status configuration used to stamp the exact revision. |
-| `.github/workflows/mcp-console-sandbox.yml` | Run the executable contract and focused native crate checks on macOS and Linux; Windows currently checks compilation only. |
-| `codex-rs/Cargo.toml` | Add the leaf crate to the workspace member list. |
-| `codex-rs/Cargo.lock` | Record the leaf crate and synchronize the release tag's stale `0.0.0` workspace package entries to `0.150.1`, which Cargo requires after adding a member. |
-| `codex-rs/linux-sandbox/src/bundled_bwrap.rs` | Resolve the exact adjacent `codex-resources/bwrap`, require the compiled digest, and expose the existing verifier for discovery. |
-| `codex-rs/linux-sandbox/src/lib.rs` | Export the narrow companion-verification seam used by runner discovery. |
-| `codex-rs/linux-sandbox/src/launcher.rs` | Select that exact bundled helper when the private runner requests it, without changing normal callers. |
-| `codex-rs/linux-sandbox/src/linux_run_main.rs` | Add hidden embedding arguments for the exact companion and caller-owned synthetic-mount registry root. |
-| `codex-rs/sandboxing/BUILD.bazel` | Make the opt-in MCP Console Seatbelt fragment available to Bazel builds. |
-| `codex-rs/sandboxing/src/manager.rs` | Export one opt-in MCP Console profile constructor without changing normal callers. |
-| `codex-rs/sandboxing/src/seatbelt.rs` | Append the release-local compatibility fragment only for the MCP Console profile. |
-| `codex-rs/sandboxing/src/seatbelt_mcp_console_policy.sbpl` | Preserve PR #150's required macOS runtime and terminal-device policy. |
+The built-executable suite covers valid launch, all truncated header lengths, zero and oversized payload lengths, truncated payloads, invalid JSON, unknown versions, empty commands, cwd and environment propagation, write denials and grants, direct network denial and enablement, managed proxy allow/deny rules, binary stdout and stderr, exit codes, native signal mapping, launch errors, and target-visible descriptor inheritance with and without a proxy.
 
-Generated Bazel metadata may also change when the repository's supported
-generators require it. Before committing, regenerate this table from the final
-diff against the base SHA and explain every additional existing file. Changes
-to Codex CLI, TUI, core, model, authentication, approval, session, app-server,
-or normal sandbox callers are outside this patch.
+Stdin tests queue `[length][JSON][sentinel]` together for sentinel sizes from 1 byte through 1 MiB, with additional 4 KiB and 8 KiB boundary sizes. They also exercise a maximum-size JSON frame and launch while the caller retains an open stdin. Replacing the raw `File` reader with `BufReader<File>` makes the sentinel test fail because the target loses the queued byte.
 
-## Codex APIs reused
+Linux tests exercise host selection and the ordinary bundled fallback through an executable probe of the native helper selection, including a host without `--argv0`. The leaf keeps its actual executable path in `argv[0]` and dispatches the native helper's leading `--sandbox-policy-cwd` option. This supplies the release's legacy-bwrap re-exec path without a temporary command alias or a change to native selection. macOS checks the ordinary profile by allowing `hw.ncpu` and denying `kern.boottime`. Environment tests compare the complete target result with a direct native launch, including platform runtime additions such as `__CF_USER_TEXT_ENCODING`.
 
-### Common policy facade
+The focused workflow tests macOS and checks a release executable. macOS is the compatibility gate; Linux and Windows compatibility are outside this task's final scope. There is no special hash staging, static-libcap check, discovery call, or lifecycle protocol smoke test.
 
-The runner builds the release's `FileSystemSandboxPolicy` and converts it with
-`PermissionProfile::from_runtime_permissions`. It supplies the target,
-environment, working directory, policy base, network policy, and managed proxy
-context to `codex_sandboxing::SandboxManager::transform`.
+## Unchanged native test failures
 
-That facade selects and translates:
+On the development macOS host, the full native sandbox suite has 92 passing tests and two failures:
 
-- `SandboxType::MacosSeatbelt` on macOS;
-- `SandboxType::LinuxSeccomp` and the `codex-linux-sandbox` self-reexecution
-  path on Linux.
+- `create_seatbelt_args_with_read_only_git_and_codex_subpaths`
+- `create_seatbelt_args_with_read_only_git_pointer_file`
 
-Do not copy the translation into the runner. The release-local
-`SandboxManager::for_mcp_console()` profile appends only MCP Console's required
-macOS runtime and terminal-device rules; normal Codex callers retain the
-release policy unchanged. If these APIs move in a later release, adapt the leaf
-call site or make the smallest shared low-level export.
+Both failures reproduce in a clean worktree at the release base. The operation is denied, but `assert_seatbelt_denied` expects `bash: <path>: Operation not
+permitted`, while the installed bash prints `bash: line 1: <path>: Operation
+not permitted`. The runner patch does not change these tests or their policy. The workflow retains its existing exclusions for those two native tests; all runner contract tests execute.
 
-### Managed proxy
+## Validation of the correction
 
-The runner uses the existing `codex-network-proxy` seams:
+On macOS, all 15 executable contract tests passed through `just test`, with retries disabled, and all 15 passed through Bazel. The locked offline Cargo build also passed. Nextest reported no leaks in the final run. An earlier concurrent run had a Nextest `LEAK` label on the test that retains the caller's stdin; its assertions passed, and an isolated run and the final full run did not report it. No supervision or timeout workaround was added.
 
-- `NetworkProxyConfig` and current domain/Unix-socket permission types;
-- `RemoteNetworkProxyConfig` and `NetworkProxyState` validation;
-- `NetworkProxy::builder`, `run`, and
-  `prepare_for_optional_environment`;
-- the returned managed sandbox context and shutdown handle.
+Before the compatibility scope was narrowed to macOS, the retained Linux path passed 17 executable contracts, 207 native sandbox tests, and focused Clippy. Those results do not expand this patch's macOS compatibility commitment.
 
-The runner owns proxy lifetime but does not duplicate HTTP, SOCKS, redirect,
-upstream, domain, environment, or shutdown logic. Managed mode always pairs
-the proxy with restricted native networking.
+`just fix -p codex-mcp-console-sandbox`, `just fmt`, the workspace Rust format check, focused Clippy with all targets and features and warnings denied, the argument-comment lint, and the focused workflow's Actionlint check passed. `just bazel-lock-update` completed without changing `MODULE.bazel.lock`; the Cargo lockfile changes no external dependency versions. `git diff --check` passed.
 
-## Platform assumptions
+## Updating to another release
 
-### macOS
-
-- `/usr/bin/sandbox-exec` exists and is the release's Seatbelt entry point.
-- `SandboxManager` remains the policy translator.
-- The launch bridge resolves `sandbox_init` and `sandbox_free_error` from the
-  process image at runtime to verify pre-existing Seatbelt confinement without
-  linking the private library into the Bazel target.
-- The runner owns a Unix process group for direct interruption and termination.
-- An independent lifetime-manager process observes exact descendant identities
-  before gate release, tracks the complete observed fork tree across process
-  groups and sessions, and performs bounded retirement even if the outer runner
-  is killed. A child that exits and is reparented before a NOTE_FORK-triggered
-  libproc snapshot is outside the observed tree.
-- The outer runner recovers a failed lifetime manager while the exact root
-  identity remains live, kills an unresponsive manager after the first bounded
-  window, and preserves diagnostic state if safe recovery cannot be established.
-- Normal completion is bounded by both lifecycle grace periods, two force
-  windows, and two one-second manager allowances. Control loss uses two
-  force-timeout-plus-allowance windows; root reaping after control EOF has one
-  further second.
-- The runner claims a distinct application-owned cleanup directory and removes
-  it only after complete retirement; identity or removal failure is reported
-  and preserves the directory.
-- Inherited terminals, caller PTYs, and in-sandbox PTY creation are supported.
-  Command targets become the foreground process group before gate release and
-  the original launcher group is restored after root exit; service launches do
-  not transfer foreground ownership. Host terminal-device isolation is not
-  claimed.
-- Managed proxy supports the capability-reported loopback/local-binding and
-  typed Unix-socket allow surface.
-
-### Linux
-
-Private runtime layout is exactly:
-
-```text
-mcp-console-sandbox
-codex-resources/bwrap
-```
-
-The runner does not search `PATH`. It self-dispatches as
-`codex-linux-sandbox`, requires the exact adjacent helper, and keeps synthetic
-mount registry data below:
-
-```text
-<state-dir>/bwrap-synthetic-mount-registry
-```
-
-The release's Linux helper remains responsible for bubblewrap, user/PID/IPC
-and network namespaces, seccomp, synthetic mounts, proxy routing, and target
-status projection. The outer runner adds one process group and a parent-death
-signal for bounded ownership. Linux does not claim interrupt or graceful
-termination across the isolated session.
-
-The Linux Cargo build compiles the SHA-256 of the finalized `codex-bwrap`
-artifact into the runner's existing Linux sandbox dependency. Discovery checks
-that exact adjacent artifact, and the native launcher repeats verification on
-an open descriptor immediately before execution. Bazel supplies the same
-digest through the release's existing `bwrap-sha256-env` target.
-
-### Windows
-
-Windows is deferred. The binary accepts a private control handle and answers
-`discover`, but reports `backend: unsupported`, no launch capabilities, no
-required companions, and setup `unsupported`. `setup_status` reports that
-state; `setup` and `launch` fail before target creation or system mutation.
-
-No sandbox identities, ACL state, firewall/WFP state, elevated helper IPC,
-desktop state, or normal `CODEX_HOME` are prepared by this patch. A later
-rolling release may export the then-current Codex Windows implementation
-behind the existing normalized protocol and explicit setup operations. It must
-add native black-box tests before advertising support.
-
-## Public capability gaps
-
-- Windows setup and launch are unsupported.
-- The release's `codex-sandboxing` dependency graph still compiles shared
-  Windows/client/telemetry support on Unix. The runner does not initialize it;
-  feature-gating that existing graph would broaden this rolling patch.
-- macOS and Linux preserve native target argument bytes through the private
-  launch bridge. macOS also preserves native target program paths; Linux target
-  paths, environment names and values, application state paths, and JSON policy
-  paths remain Unicode in version 1.
-- Host terminal-device isolation is unsupported.
-- Linux interrupt and graceful termination are unsupported.
-- Linux does not expose configurable loopback denial or Unix-socket policy;
-  managed networking requires the supported local-binding/loopback pair.
-- Unix-socket deny, SOCKS UDP, explicit local ports, managed CA/TLS
-  interception, non-loopback proxy listeners, credentials, secrets, header
-  injection, approvals, and interactive elicitation are unsupported.
-- Platform extensions are closed and currently empty on macOS and Linux. Raw
-  SBPL and arbitrary backend policy are unsupported.
-- The release's managed-proxy shutdown currently returns no cleanup error. The
-  protocol keeps cleanup failure separate from target and retirement outcomes;
-  executable tests exercise target-directory cleanup failure independently.
-
-These gaps must fail before target launch. Do not remove a gap merely because a
-low-level API exists; first expose it through capabilities, validation, native
-enforcement, and executable contract tests.
-
-## Validation commands
-
-Run from the repository root unless a command begins with `cd codex-rs`:
+Start a new release branch and review the native interfaces before carrying forward the leaf and workflow. Keep the two workspace changes separate from leaf behavior. Regenerate Cargo and Bazel lock state after dependencies are settled, inspect every existing-file modification, and run the native and executable checks on macOS. Other platform compatibility needs separate work.
 
 ```console
-python3 .github/scripts/verify_cargo_workspace_manifests.py
+git diff --name-status 90854393966b21e9ebfd21b122334eb09a20c93d...HEAD
+cd codex-rs
+just test -p codex-mcp-console-sandbox
+just test -p codex-sandboxing
+cargo clippy -p codex-mcp-console-sandbox --all-targets --all-features -- -D warnings
+cd ..
 just bazel-lock-update
-just bazel-lock-check
-bazel build \
-  --config=mcp-console-sandbox \
-  //codex-rs/mcp-console-sandbox:mcp-console-sandbox \
-  //codex-rs/bwrap:bwrap
-bazel test \
-  --config=mcp-console-sandbox \
-  //codex-rs/mcp-console-sandbox:mcp-console-sandbox-lib-contract-test
-actionlint .github/workflows/mcp-console-sandbox.yml
+bazel test //codex-rs/mcp-console-sandbox:bootstrap-contract-test
+just fix -p codex-mcp-console-sandbox
+just fmt
+cd codex-rs
+cargo fmt --all -- --check
+cd ..
 git diff --check
 ```
 
-Run from `codex-rs`:
-
-```console
-just test -p codex-mcp-console-sandbox
-just test -p codex-linux-sandbox --no-tests=pass
-just test -p codex-bwrap --no-tests=pass
-just test -p codex-sandboxing
-just argument-comment-lint -p codex-mcp-console-sandbox
-cargo clippy -p codex-mcp-console-sandbox --all-targets --all-features -- -D warnings
-cargo build \
-  --locked \
-  -p codex-mcp-console-sandbox \
-  --bin mcp-console-sandbox \
-  --release
-just fix -p codex-mcp-console-sandbox
-just fmt
-```
-
-On Linux, prepare the debug helper before the runner test, argument lint,
-Clippy, or `fix` commands:
-
-```console
-cargo build --locked -p codex-bwrap --bin bwrap
-export CARGO_BIN_EXE_bwrap="$PWD/target/debug/bwrap"
-export CODEX_BWRAP_SHA256="$(sha256sum "$CARGO_BIN_EXE_bwrap" | cut -d ' ' -f 1)"
-```
-
-Before the release runner build, replace both values with the finalized
-release helper:
-
-```console
-cargo build --locked -p codex-bwrap --bin bwrap --release
-export CARGO_BIN_EXE_bwrap="$PWD/target/release/bwrap"
-export CODEX_BWRAP_SHA256="$(sha256sum "$CARGO_BIN_EXE_bwrap" | cut -d ' ' -f 1)"
-```
-
-The workflow performs the same ordering without relying on shell state.
-
-Follow the repository instruction that tests run before the final `fix` and
-`fmt`, with no test rerun afterward. Run the focused native executable suite on
-macOS and Linux. Windows is a compile-only CI target in this patch; native
-Windows protocol and launch tests remain deferred with the backend.
-
-The native suites must cover capability discovery, exact source revision,
-framing failures, state transitions, native command/environment preservation,
-direct independent streams, filesystem rules and state protection, network
-modes and proxy cleanup, terminals, signals, target outcome, descendant
-retirement, and control loss. Capability-gated unsupported requests must be
-tested for fail-closed rejection.
-
-Before publication also record:
-
-```console
-git rev-parse HEAD
-git diff --name-status 90854393966b21e9ebfd21b122334eb09a20c93d..HEAD
-git diff --stat 90854393966b21e9ebfd21b122334eb09a20c93d..HEAD
-git status --short
-```
-
-The final branch must contain one logical commit directly above the release
-base and no uncommitted files.
-
-## Rolling-release procedure
-
-For each new stable Codex release:
-
-1. Start a fresh branch from the next exact stable Codex release and record its
-   tag, SHA, workspace version, and Rust toolchain.
-2. Inspect the previous runner's protocol, executable tests, README, and this
-   REBASE record.
-3. Inspect the new release's current macOS, Linux, Windows, and managed-network
-   implementations; do not assume the old internal seams still exist.
-4. Reimplement the same external contract against the new release's internals
-   with the smallest leaf crate and narrow shared exports.
-5. Do not merge or cherry-pick the old rolling-patch branch.
-6. Preserve protocol version 1 unless the downstream contract intentionally
-   changes; document and test any version change.
-7. Run native executable tests on every advertised supported platform. A
-   deferred platform may run discovery and fail-closed unsupported tests only.
-8. Create one logical commit directly above the new release base, stamp the
-   exact immutable revision, and let MCP Console pin that commit.
-
-Recheck the complete existing-file list and helper layout on every release.
-Delete release-specific adapters that are no longer needed; do not accumulate
-compatibility layers for old Codex internals.
+On Linux, also build and test `codex-bwrap` and test `codex-linux-sandbox`. Put the built debug bwrap on `PATH` for native tests: one unchanged test uses the host executable as a bundled fixture, which requires bundled capabilities. The runner contracts separately exercise suitable, unsuitable, missing, and no-`--argv0` host executables. Do not carry native policy relaxations or lifecycle machinery into the next release. A native limitation should remain explicit rather than acquire a second implementation in the leaf.
