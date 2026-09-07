@@ -96,9 +96,8 @@ pub async fn run(request: Bootstrap, stdin: File) -> Result<ExitStatus> {
             .current_dir(request.cwd.as_path())
             .env_clear()
             .envs(prepared.env);
-        if let Some(arg0) = prepared.arg0 {
-            command.arg0(arg0);
-        }
+        // Keep the real executable path in argv[0]. Native bwrap's no-argv0
+        // compatibility path re-execs that path; main dispatches helper args.
         command
             .stdin(Stdio::from(stdin))
             .stdout(Stdio::inherit())

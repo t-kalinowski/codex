@@ -23,7 +23,12 @@ rust_binary(
     name = "mcp-console-sandbox-fixture",
     srcs = ["src/bin/mcp_console_sandbox_fixture.rs"],
     edition = "2024",
-    deps = all_crate_deps(),
+    # The target probe needs no sandbox or proxy dependencies.
+    deps = [
+        "@crates//:anyhow",
+        "@crates//:libc",
+        "@crates//:serde_json",
+    ],
 )
 
 rust_test(

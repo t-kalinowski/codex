@@ -8,14 +8,11 @@ mod launch;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn main() {
     #[cfg(target_os = "linux")]
-    if std::env::args_os()
-        .next()
-        .as_deref()
-        .and_then(|arg0| std::path::Path::new(arg0).file_name())
-        == Some(std::ffi::OsStr::new("codex-linux-sandbox"))
-    {
-        // Native helper re-execs retain the descriptors that Codex needs during
-        // setup. Only the outer bootstrap invocation seals caller descriptors.
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--sandbox-policy-cwd")) {
+        // SandboxManager emits this leading option for the native helper.
+        // Dispatch by its arguments so argv[0] can remain an executable path
+        // when a host bwrap lacks --argv0. Helper re-execs must also retain the
+        // descriptors Codex needs temporarily during setup.
         crate::codex::linux_sandbox_main();
     }
     let result = run();
