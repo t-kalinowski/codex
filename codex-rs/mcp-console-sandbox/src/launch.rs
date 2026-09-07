@@ -21,6 +21,10 @@ use std::sync::Arc;
 use tokio::process::Command;
 
 pub async fn run(request: Bootstrap, stdin: File) -> Result<ExitStatus> {
+    ensure!(
+        cfg!(target_os = "macos") || request.macos_seatbelt_profile_extension.is_none(),
+        "macos_seatbelt_profile_extension is supported only on macOS"
+    );
     let filesystem = FileSystemSandboxPolicy::try_from(request.filesystem)
         .map_err(anyhow::Error::msg)
         .context("invalid filesystem policy")?;
@@ -60,7 +64,7 @@ pub async fn run(request: Bootstrap, stdin: File) -> Result<ExitStatus> {
     let executable = std::env::current_exe()?;
     let mut args = request.command.into_iter();
     let program = args.next().context("command must contain a program")?;
-    let prepared = manager.transform(SandboxTransformRequest {
+    let mut prepared = manager.transform(SandboxTransformRequest {
         command: SandboxCommand {
             program: program.into(),
             args: args.collect(),
@@ -80,6 +84,23 @@ pub async fn run(request: Bootstrap, stdin: File) -> Result<ExitStatus> {
         windows_sandbox_level: WindowsSandboxLevel::Disabled,
         windows_sandbox_private_desktop: false,
     })?;
+    if let Some(extension) = request.macos_seatbelt_profile_extension {
+        ensure!(
+            sandbox == SandboxType::MacosSeatbelt,
+            "macos_seatbelt_profile_extension requires the native Seatbelt sandbox"
+        );
+        let [program, option, profile, ..] = prepared.command.as_mut_slice() else {
+            anyhow::bail!("native Seatbelt command is missing its profile");
+        };
+        ensure!(
+            program == "/usr/bin/sandbox-exec" && option == "-p",
+            "native Seatbelt command must start with /usr/bin/sandbox-exec -p"
+        );
+        // The trusted caller owns these rules. Apply them in the same profile;
+        // Seatbelt rejects a second sandbox initialization in the target.
+        profile.push('\n');
+        profile.push_str(&extension);
+    }
     let handle = if let Some(proxy) = &proxy {
         Some(proxy.run().await?)
     } else {

@@ -32,17 +32,22 @@ There are no later control messages, acknowledgments, success frames, stream han
 }
 ```
 
-| Field         | Type and meaning                                                                                                                                                       |
-| ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `version`     | Unsigned integer; must equal 1.                                                                                                                                        |
-| `command`     | Nonempty UTF-8 string array. The first item names the executable; later items are arguments. The runner does not insert a shell. Native executable lookup rules apply. |
-| `cwd`         | Upstream `AbsolutePathBuf`; a host-local absolute working directory. It is also the sandbox policy's working-directory context.                                        |
-| `environment` | Complete map of UTF-8 names and values, passed with the native proxy overrides documented in the README.                                                               |
-| `filesystem`  | Upstream `RawFileSystemSandboxPolicy`, converted through its existing `TryFrom` into `FileSystemSandboxPolicy` and `PermissionProfile`.                                |
-| `network`     | Upstream `NetworkSandboxPolicy`: `"restricted"` or `"enabled"`.                                                                                                        |
-| `proxy`       | Optional upstream `RemoteNetworkProxyConfig`. Omit or use `null` for no proxy. A supplied configuration must have `enabled: true`.                                     |
+| Field                              | Type and meaning                                                                                                                                                              |
+| ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `version`                          | Unsigned integer; must equal 1.                                                                                                                                               |
+| `command`                          | Nonempty UTF-8 string array. The first item names the executable; later items are arguments. The runner does not insert a shell. Native executable lookup rules apply.        |
+| `cwd`                              | Upstream `AbsolutePathBuf`; a host-local absolute working directory. It is also the sandbox policy's working-directory context.                                               |
+| `environment`                      | Complete map of UTF-8 names and values, passed with the native proxy overrides documented in the README.                                                                      |
+| `filesystem`                       | Upstream `RawFileSystemSandboxPolicy`, converted through its existing `TryFrom` into `FileSystemSandboxPolicy` and `PermissionProfile`.                                       |
+| `network`                          | Upstream `NetworkSandboxPolicy`: `"restricted"` or `"enabled"`.                                                                                                               |
+| `proxy`                            | Optional upstream `RemoteNetworkProxyConfig`. Omit or use `null` for no proxy. A supplied configuration must have `enabled: true`.                                            |
+| `macos_seatbelt_profile_extension` | Optional trusted SBPL string appended to the native macOS Seatbelt profile. Omit or use `null` to leave the native profile unchanged. A supplied string is rejected on Linux. |
 
 The wrapper rejects unknown top-level fields. Nested upstream types retain the release's own serialization and validation rules. Version 1 requires UTF-8 command arguments, paths, and environment values; OS strings with other byte encodings are outside this protocol. Native argument and environment size and NUL restrictions still apply.
+
+`macos_seatbelt_profile_extension` is trusted caller configuration. The runner appends a newline and the string to the profile prepared by the native Seatbelt backend, then launches the same `/usr/bin/sandbox-exec -p` command. It verifies that backend and command shape before appending. It does not initialize a second sandbox. Invalid SBPL fails through the native launcher before the target starts.
+
+The extension can grant permissions as well as restrict them. The runner does not parse it or validate it as deny-only; the caller owns its interaction with the native filesystem, network, and platform rules. Do not populate this field from untrusted target input. The runner contains no application-specific rules.
 
 For example, append this entry to grant one writable directory:
 

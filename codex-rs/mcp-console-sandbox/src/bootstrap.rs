@@ -23,6 +23,7 @@ pub struct Bootstrap {
     pub filesystem: RawFileSystemSandboxPolicy,
     pub network: NetworkSandboxPolicy,
     pub proxy: Option<RemoteNetworkProxyConfig>,
+    pub macos_seatbelt_profile_extension: Option<String>,
 }
 
 pub fn read() -> Result<(Bootstrap, File)> {

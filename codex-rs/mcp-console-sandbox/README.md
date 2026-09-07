@@ -2,7 +2,7 @@
 
 `mcp-console-sandbox` extracts the native sandbox in this Codex release into a standalone executable. Start it as an ordinary child process and send one bootstrap frame on stdin. The requested command is an opaque process with inherited stdin, stdout, and stderr. Version 1 requires UTF-8 arguments, paths, and environment values.
 
-The executable boundary is the integration contract. Callers do not link to or call Codex Rust crates. Inside the executable, the upstream filesystem and network policies, managed proxy, and ordinary `SandboxManager` own sandbox behavior. The private `src/codex.rs` facade contains every upstream import; `src/bootstrap.rs` contains the small local wire wrapper.
+The executable boundary is the integration contract. Callers do not link to or call Codex Rust crates. Inside the executable, the upstream filesystem and network policies, managed proxy, and ordinary `SandboxManager` prepare the native sandbox. A trusted caller can supply additional macOS Seatbelt rules through the optional `macos_seatbelt_profile_extension` bootstrap field. The private `src/codex.rs` facade contains every upstream import; `src/bootstrap.rs` contains the small local wire wrapper.
 
 The runner validates one bootstrap, configures the native sandbox and optional proxy, launches one command, waits, and releases its native setup resources. Generation lifetime, parent monitoring, restarts, retirement, application temporary directories, and backend lifecycle management belong to the caller. There is no persistent control channel or target stream protocol.
 
@@ -13,6 +13,8 @@ The normal invocation takes no arguments. Write a four-byte unsigned big-endian 
 Stdout and stderr belong to the target. Configuration or launch failures use stderr and a nonzero exit. A completed native launch returns its exit code; a signal death maps to `128 + signal`, matching the native CLI. The caller chooses any cancellation, terminal ownership, or process-tree retirement policy.
 
 See [PROTOCOL.md](PROTOCOL.md) for the complete request and a runnable caller.
+
+On macOS, `macos_seatbelt_profile_extension` appends trusted caller-supplied SBPL to the native profile in the same sandbox launch. It can grant permissions as well as restrict them; the runner does not validate it as deny-only. Omit the field or use `null` to preserve the native profile. Linux rejects a supplied string. The caller owns these rules; no application-specific profile is built into the runner.
 
 ## Platforms and packaging
 
@@ -101,6 +103,6 @@ Ubuntu's AppArmor restrictions can block unprivileged namespace setup even when 
 
 There is no automatic legacy-Landlock or unsandboxed fallback. Filesystem policies must allow the executable and runtime files needed by the native sandbox path. Upstream policy kinds retain their upstream meaning. Native seccomp restrictions on Unix sockets also remain unchanged; inheriting a socket as a standard stream does not exempt its operations from those rules.
 
-The ordinary macOS profile retains its existing sysctl, Mach-service, terminal, and filesystem restrictions. Applications that needed the removed custom allowances may now fail under those same native restrictions.
+Without a caller-supplied extension, the ordinary macOS profile retains its existing sysctl, Mach-service, terminal, and filesystem restrictions. Applications may need caller-owned compatibility rules for operations outside those native permissions.
 
-Proxy protocol support and local-network exceptions are those of the release; the runner adds no UDP routing, approval service, or policy extensions. Native helpers may retain standard streams or terminate descendants according to their own behavior. The runner waits for the native launch path and adds no general process-tree cleanup, signal forwarding, parent-death monitor, or stdin relay.
+Proxy protocol support and local-network exceptions are those of the release; the runner adds no UDP routing or approval service. Native helpers may retain standard streams or terminate descendants according to their own behavior. The runner waits for the native launch path and adds no general process-tree cleanup, signal forwarding, parent-death monitor, or stdin relay.

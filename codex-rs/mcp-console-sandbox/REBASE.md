@@ -83,6 +83,16 @@ The five-run regression check used `bazel test --cache_test_results=no --runs_pe
 
 The runtime source, bootstrap protocol, Bazel rules, and native policies remain unchanged. The only Linux code correction is in the leaf's executable test harness. The residual existing-upstream-file audit above still contains only workspace membership and generated Cargo lock state. No dependencies changed during the Linux work, so no lockfile regeneration is needed. The macOS job and its two native exclusions are preserved. Hosted CI has not run for these new commits; no push or workflow dispatch was performed.
 
+## Caller-supplied macOS profile extension
+
+The optional `macos_seatbelt_profile_extension` bootstrap field lets a trusted caller append SBPL to the profile prepared by the native Seatbelt backend. The leaf verifies the selected backend and `/usr/bin/sandbox-exec -p` command prefix before appending the rules to that same invocation. This preserves a single sandbox initialization; macOS rejects attempts to add another profile inside an already sandboxed target.
+
+The caller owns the rules. They can grant permissions as well as restrict them, and the runner does not validate them as deny-only. Absent or null leaves the native profile unchanged. Linux rejects a supplied string before native setup. The runner contains no application-specific policy, and no upstream production file or dependency changed.
+
+The public executable regressions first failed because the old bootstrap rejected the new field. The macOS suite now covers unchanged default and null behavior, blocking a pre-existing host PTY while preserving fresh PTY creation, name lookup and bidirectional input/output, granting an otherwise denied sysctl, and rejecting malformed SBPL before target launch. All 18 executable contracts passed through `just test -p codex-mcp-console-sandbox --retries 0` and the Bazel executable target. A Linux rejection regression is included but has not run on this macOS host.
+
+`just fix -p codex-mcp-console-sandbox`, `just fmt`, the workspace Rust format check, focused Clippy with all targets/features and `-D warnings`, the argument-comment lint, and `git diff --check` passed. The argument-comment check retained its existing unknown-lint warnings in upstream dependencies and reported no leaf finding. Hosted CI has not run for this change.
+
 ## Updating to another release
 
 Start a new release branch and review the native interfaces before carrying forward the leaf and workflow. Keep the two workspace changes separate from leaf behavior. Regenerate Cargo and Bazel lock state after dependencies are settled, inspect every existing-file modification, and run the native and executable checks on both Linux and macOS. Windows compatibility remains outside scope.
@@ -120,4 +130,4 @@ git diff --check
 
 After dependency changes, also run `just bazel-lock-update` from the repository root and inspect the generated lockfiles. On macOS, omit the Linux helper packages and retain exactly the two native test exclusions listed above. Run the complete executable suite and the existing macOS release smoke test. Do not rerun functional tests merely because fix/format ran.
 
-Put the built debug bwrap on `PATH` only for the native tests: one unchanged test uses the host executable as a bundled fixture, which requires bundled capabilities. The runner contracts separately exercise suitable, unsuitable, missing, and no-`--argv0` host executables. Do not carry native policy relaxations or lifecycle machinery into the next release. A native limitation should remain explicit rather than acquire a second implementation in the leaf.
+Put the built debug bwrap on `PATH` only for the native tests: one unchanged test uses the host executable as a bundled fixture, which requires bundled capabilities. The runner contracts separately exercise suitable, unsuitable, missing, and no-`--argv0` host executables. Do not carry application-specific native policy rules or lifecycle machinery into the next release. Preserve the caller-supplied extension only after verifying the new native Seatbelt command shape and rerunning its executable contracts.

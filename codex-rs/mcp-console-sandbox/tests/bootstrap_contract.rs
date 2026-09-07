@@ -359,6 +359,98 @@ fn ordinary_seatbelt_profile_retains_native_sysctl_denials() {
     }
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_seatbelt_profile_extension_preserves_pty_workflows() {
+    use std::ffi::CStr;
+    use std::os::fd::FromRawFd;
+    use std::os::fd::OwnedFd;
+
+    let (mut master, mut slave) = (-1, -1);
+    let mut name = [0; libc::PATH_MAX as usize];
+    // SAFETY: openpty initializes the descriptors and pathname; null keeps
+    // the default terminal settings.
+    assert_eq!(
+        unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                name.as_mut_ptr(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        },
+        0
+    );
+    // SAFETY: the test owns both descriptors and openpty terminated the name.
+    let (_master, _slave, name) = unsafe {
+        (
+            OwnedFd::from_raw_fd(master),
+            OwnedFd::from_raw_fd(slave),
+            CStr::from_ptr(name.as_ptr()).to_str().unwrap(),
+        )
+    };
+    let extension = r#"
+(deny file-read*
+  (literal "/dev/tty")
+  (regex #"^/dev/ttys[0-9]+$"))
+(allow file-read* file-write* file-ioctl
+  (require-all
+    (regex #"^/dev/ttys[0-9]+$")
+    (extension "com.apple.sandbox.pty")))
+"#;
+    for extension in [None, Some(Value::Null), Some(json!(extension))] {
+        let mut request = fixture("pty", &[name]);
+        let host_readable = !extension.as_ref().is_some_and(Value::is_string);
+        if let Some(extension) = extension {
+            request["macos_seatbelt_profile_extension"] = extension;
+        }
+        let output = run(frame(&request, &[]));
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(output.stderr, b"");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+            json!({"host_readable": host_readable, "input": "input\n", "output": "output"})
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_seatbelt_profile_extension_can_grant_native_permissions() {
+    let mut request = fixture("sysctl", &["kern.boottime"]);
+    request["macos_seatbelt_profile_extension"] =
+        json!(r#"(allow sysctl-read (sysctl-name "kern.boottime"))"#);
+    let output = run(frame(&request, &[]));
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!((output.stdout, output.stderr), (vec![], vec![]));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn malformed_macos_seatbelt_profile_extension_prevents_target_launch() {
+    let mut request = request(&["/bin/echo", "launched"]);
+    request["macos_seatbelt_profile_extension"] = json!("(invalid-sbpl-operation)");
+    let output = run(frame(&request, &[]));
+    assert!(!output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("invalid-sbpl-operation"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn macos_seatbelt_profile_extension_is_rejected_on_linux() {
+    let mut request = request(&["/bin/echo", "launched"]);
+    request["macos_seatbelt_profile_extension"] = json!("(deny network*)");
+    let output = run(frame(&request, &[]));
+    assert!(!output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"");
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("macos_seatbelt_profile_extension is supported only on macOS")
+    );
+}
+
 #[test]
 fn maximum_frame_and_prequeued_input_remain_separate() {
     let mut payload = serde_json::to_vec(&request(&["/bin/cat"])).unwrap();

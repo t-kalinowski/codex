@@ -104,6 +104,63 @@ fn main() -> anyhow::Result<()> {
             std::io::copy(&mut stream, &mut std::io::stdout())?;
         }
         #[cfg(target_os = "macos")]
+        "pty" => {
+            use std::fs::File;
+            use std::os::fd::FromRawFd;
+            use std::os::unix::fs::OpenOptionsExt;
+
+            let path = args.next().context("host PTY path")?;
+            let host_readable = match File::options()
+                .read(true)
+                .custom_flags(libc::O_NOCTTY)
+                .open(path)
+            {
+                Ok(_) => true,
+                Err(error) if error.raw_os_error() == Some(libc::EPERM) => false,
+                Err(error) => return Err(error.into()),
+            };
+            let (mut master, mut slave) = (-1, -1);
+            // SAFETY: openpty initializes both descriptors; null uses default
+            // terminal settings and does not request the slave pathname.
+            if unsafe {
+                libc::openpty(
+                    &mut master,
+                    &mut slave,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            } != 0
+            {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            let mut name = [0; libc::PATH_MAX as usize];
+            // SAFETY: slave is an open PTY and name provides the stated space.
+            let error = unsafe { libc::ttyname_r(slave, name.as_mut_ptr(), name.len()) };
+            anyhow::ensure!(
+                error == 0,
+                "PTY name lookup: {}",
+                std::io::Error::from_raw_os_error(error)
+            );
+            // SAFETY: the fixture owns the two newly opened descriptors.
+            let (mut master, mut slave) =
+                unsafe { (File::from_raw_fd(master), File::from_raw_fd(slave)) };
+            slave.write_all(b"output")?;
+            let mut output = [0; 6];
+            master.read_exact(&mut output)?;
+            master.write_all(b"input\n")?;
+            let mut input = [0; 6];
+            slave.read_exact(&mut input)?;
+            serde_json::to_writer(
+                std::io::stdout(),
+                &serde_json::json!({
+                    "host_readable": host_readable,
+                    "output": String::from_utf8(output.to_vec())?,
+                    "input": String::from_utf8(input.to_vec())?,
+                }),
+            )?;
+        }
+        #[cfg(target_os = "macos")]
         "sysctl" => {
             let name = std::ffi::CString::new(args.next().context("sysctl name")?)?;
             let mut length = 0;
