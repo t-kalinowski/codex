@@ -1,4 +1,4 @@
-name: Native sandbox runner (macOS and Linux)
+name: Native sandbox executable (macOS and Linux)
 
 on:
   workflow_dispatch:
@@ -33,8 +33,8 @@ jobs:
       - name: Check Rust formatting
         run: cargo fmt --all -- --check
       - name: Run executable contracts
-        run: just test -p codex-mcp-console-sandbox
-      - name: Lint runner
+        run: just test --locked -p codex-mcp-console-sandbox --retries 0
+      - name: Lint native executable
         run: cargo clippy -p codex-mcp-console-sandbox --all-targets --all-features -- -D warnings
       - name: Test native sandbox
         # These two unchanged release tests also fail at 90854393966b:
@@ -50,11 +50,12 @@ jobs:
           just argument-comment-lint -p codex-mcp-console-sandbox
       - name: Build standalone release executable
         run: cargo build --locked -p codex-mcp-console-sandbox --bin mcp-console-sandbox --release
-      - name: Smoke release executable
+      - name: Run all contracts against release executable
         run: |
-          env \
-            "CARGO_BIN_EXE_mcp-console-sandbox=${CARGO_TARGET_DIR}/release/mcp-console-sandbox" \
-            just test -p codex-mcp-console-sandbox filesystem_policy_denies_and_grants_writes
+          sandbox_target_dir="$(cargo metadata --locked --format-version=1 --no-deps |
+            python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')"
+          env "CARGO_BIN_EXE_mcp-console-sandbox=$sandbox_target_dir/release/mcp-console-sandbox" \
+            just test --locked -p codex-mcp-console-sandbox --retries 0
       - name: Check for a clean worktree
         if: always() && !cancelled()
         uses: ./.github/actions/check-clean-worktree
@@ -105,7 +106,7 @@ jobs:
       - name: Run executable contracts
         run: |
           env "CARGO_BIN_EXE_bwrap=$SANDBOX_TARGET_DIR/debug/bwrap" \
-            just test -p codex-mcp-console-sandbox --retries 0
+            just test --locked -p codex-mcp-console-sandbox --retries 0
       - name: Test native Linux sandbox
         # An unchanged native test copies the host bwrap into a bundled fixture.
         # Supply the actual bundled capabilities; leaf tests set their own PATH.
@@ -126,8 +127,8 @@ jobs:
         run: |
           env "CARGO_BIN_EXE_mcp-console-sandbox=$SANDBOX_TARGET_DIR/release/mcp-console-sandbox" \
             "CARGO_BIN_EXE_bwrap=$SANDBOX_TARGET_DIR/release/bwrap" \
-            just test -p codex-mcp-console-sandbox --retries 0
-      - name: Lint runner
+            just test --locked -p codex-mcp-console-sandbox --retries 0
+      - name: Lint native executable
         run: cargo clippy -p codex-mcp-console-sandbox --all-targets --all-features -- -D warnings
       - name: Check for a clean worktree
         if: always() && !cancelled()

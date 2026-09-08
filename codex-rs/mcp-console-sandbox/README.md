@@ -1,14 +1,16 @@
-# Standalone native sandbox runner
+# Standalone native sandbox executable
 
-`mcp-console-sandbox` extracts the native sandbox in this Codex release into a standalone executable. Start it as an ordinary child process and send one bootstrap frame on stdin. The requested command is an opaque process with inherited stdin, stdout, and stderr. Version 1 requires UTF-8 arguments, paths, and environment values.
+`mcp-console-sandbox` extracts the native sandbox in this Codex release into a standalone executable. Start it as an ordinary child process with `--bootstrap-fd <N>` and send one bootstrap frame through that inherited descriptor. Leave the target's original stdin attached from process creation. The requested command is an opaque process with inherited stdin, stdout, and stderr. Version 2 requires UTF-8 arguments, paths, and environment values.
 
 The executable boundary is the integration contract. Callers do not link to or call Codex Rust crates. Inside the executable, the upstream filesystem and network policies, managed proxy, and ordinary `SandboxManager` prepare the native sandbox. A trusted caller can supply additional macOS Seatbelt rules through the optional `macos_seatbelt_profile_extension` bootstrap field. The private `src/codex.rs` facade contains every upstream import; `src/bootstrap.rs` contains the small local wire wrapper.
 
-The runner validates one bootstrap, configures the native sandbox and optional proxy, launches one command, waits, and releases its native setup resources. Generation lifetime, parent monitoring, restarts, retirement, application temporary directories, and backend lifecycle management belong to the caller. There is no persistent control channel or target stream protocol.
+The native sandbox executable validates one bootstrap, configures the native sandbox and optional proxy, launches one command, waits, and releases its native setup resources. Generation lifetime, parent monitoring, restarts, retirement, application temporary directories, and backend lifecycle management belong to the caller. There is no persistent control channel or target stream protocol.
 
 ## Invocation
 
-The normal invocation takes no arguments. Write a four-byte unsigned big-endian payload length, the JSON payload, and then any target input. The maximum JSON payload is 1 MiB. Target input may follow immediately; there is no launch acknowledgment. The runner reads only the remaining frame bytes from raw fd 0 and transfers that same open file description to the command.
+The private invocation is `mcp-console-sandbox --bootstrap-fd <N>`, where N is an open, readable inherited descriptor greater than 2. The launcher normally supplies the read end of an anonymous pipe and retains the writer. Start the executable before writing the four-byte unsigned big-endian length and JSON payload, which may be up to 1 MiB. A complete valid frame releases startup without waiting for EOF; closing the writer before completing the frame cancels startup.
+
+This is a breaking change to private protocol version 2. The no-argument invocation is rejected. Configuration is read exclusively from the bootstrap descriptor, which is closed before native setup. There is no descriptor transfer after process creation. Target stdin keeps its original open file description; the waiting executable releases its input copy after spawning the child.
 
 Stdout and stderr belong to the target. Configuration or launch failures use stderr and a nonzero exit. A completed native launch returns its exit code; a signal death maps to `128 + signal`, matching the native CLI. The caller chooses any cancellation, terminal ownership, or process-tree retirement policy.
 
@@ -18,7 +20,7 @@ On macOS, `macos_seatbelt_profile_extension` appends trusted caller-supplied SBP
 
 ## Platforms and packaging
 
-Linux and macOS are supported and have separate jobs in the focused workflow. Both use the release's native sandbox behavior. Linux executable contracts are validated locally with debug, release, and Bazel builds; [REBASE.md](REBASE.md) records the environment and results. Windows compatibility remains outside scope.
+Linux and macOS are supported and have separate jobs in the focused workflow. Both use the release's native sandbox behavior. See [REBASE.md](REBASE.md) for platform validation environments and results. Windows compatibility remains outside scope.
 
 | Platform                    | Behavior                                                                                                                         |
 | --------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
@@ -106,3 +108,5 @@ There is no automatic legacy-Landlock or unsandboxed fallback. Filesystem polici
 Without a caller-supplied extension, the ordinary macOS profile retains its existing sysctl, Mach-service, terminal, and filesystem restrictions. Applications may need caller-owned compatibility rules for operations outside those native permissions.
 
 Proxy protocol support and local-network exceptions are those of the release; the runner adds no UDP routing or approval service. Native helpers may retain standard streams or terminate descendants according to their own behavior. The runner waits for the native launch path and adds no general process-tree cleanup, signal forwarding, parent-death monitor, or stdin relay.
+
+For downstream adoption, update the source and protocol pins, inherit the bootstrap descriptor, and remove SCM_RIGHTS stdin handoff. Preserve any wrapper code still needed to restore the target's signal mask, along with MCP Console's supervision and signal-delivery responsibilities. This change does not make the entire wrapper removable. See the [handoff notes](PROTOCOL.md#downstream-handoff).

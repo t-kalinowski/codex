@@ -29,11 +29,13 @@ The runner has no persistent protocol, stream bridge, supervisor, process-tree t
 
 The built-executable suite covers valid launch, all truncated header lengths, zero and oversized payload lengths, truncated payloads, invalid JSON, unknown versions, empty commands, cwd and environment propagation, write denials and grants, direct network denial and enablement, managed proxy allow/deny rules, binary stdout and stderr, exit codes, native signal mapping, launch errors, and target-visible descriptor inheritance with and without a proxy.
 
-Stdin tests queue `[length][JSON][sentinel]` together for sentinel sizes from 1 byte through 1 MiB, with additional 4 KiB and 8 KiB boundary sizes. They also exercise a maximum-size JSON frame and launch while the caller retains an open stdin. Replacing the raw `File` reader with `BufReader<File>` makes the sentinel test fail because the target loses the queued byte.
+The current private protocol is version 2: `--bootstrap-fd <N>` supplies configuration independently of stdin. The tests cover prequeued binary input, including bytes resembling a version-1 frame, empty open stdin, regular-file offsets and shared seeks, PTY identity, null and closed stdin, fragmented and maximum-size frames, cancellation, exact frame consumption, malformed arguments, descriptor reuse, bootstrap-resource closure with and without a proxy, and independent concurrent launches. A full input pipe and target checkpoint verify that the waiting executable releases its own reader. This ownership test uses the native seccomp-only path on Linux to distinguish this executable from upstream helpers that can retain stdin; the other Linux contracts retain bubblewrap coverage.
 
 Linux tests exercise host selection and the ordinary bundled fallback through an executable probe of the native helper selection, including a host without `--argv0`. The leaf keeps its actual executable path in `argv[0]` and dispatches the native helper's leading `--sandbox-policy-cwd` option. This supplies the release's legacy-bwrap re-exec path without a temporary command alias or a change to native selection. macOS checks the ordinary profile by allowing `hw.ncpu` and denying `kern.boottime`. Environment tests compare the complete target result with a direct native launch, including platform runtime additions such as `__CF_USER_TEXT_ENCODING`.
 
 The focused workflow retains the macOS job and adds an Ubuntu 24.04 Linux job. Linux runs all executable contracts against debug and release runner/bubblewrap pairs, the native sandbox suites without exclusions, the Bazel executable contract, and focused lint checks. The shared CI setup supplies namespace prerequisites. Windows remains outside scope. There is no special hash staging, static-libcap check, discovery call, or lifecycle protocol smoke test.
+
+The following validation sections describe earlier commits and protocol version 1. They are historical records, not results for the descriptor transport change.
 
 ## Unchanged native test failures
 
@@ -93,6 +95,35 @@ The public executable regressions first failed because the old bootstrap rejecte
 
 `just fix -p codex-mcp-console-sandbox`, `just fmt`, the workspace Rust format check, focused Clippy with all targets/features and `-D warnings`, the argument-comment lint, and `git diff --check` passed. The argument-comment check retained its existing unknown-lint warnings in upstream dependencies and reported no leaf finding. Hosted CI has not run for this change.
 
+## Dedicated bootstrap descriptor on 2026-09-08
+
+The private entry point now accepts only `--bootstrap-fd <N>` with a version-2 frame on an inherited readable descriptor above stdio. Validation and ownership adoption precede descriptor enumeration and runtime creation, so a closed caller descriptor cannot be mistaken for a newly allocated internal descriptor. Ordinary `File::read_exact` framing remains bounded to 1 MiB and does not wait for EOF. The bootstrap file closes before runtime, proxy, helper, or target setup.
+
+The target keeps its original stdin open file description. The executable drops its `Command` after spawn to release the owned input reader before waiting. The executable regression failed with that drop removed and passed with it restored. No stdin relay, descriptor passing, signal change, or lifecycle protocol was added. Rust startup's existing normalization of closed stdio to `/dev/null` remains in effect.
+
+The native Linux helper dispatch stays ahead of top-level argument validation, preserving leading `--sandbox-policy-cwd` invocations and re-execs for host bubblewrap without `--argv0`. Helper setup descriptors retain their existing ownership. No upstream helper, policy, facade, or dependency changed. The focused macOS workflow now exercises the full release executable suite, matching Linux's existing debug/release coverage.
+
+See [PROTOCOL.md](PROTOCOL.md) and [examples/bootstrap.py](examples/bootstrap.py) for the new contract and caller. Downstream must update the immutable source and protocol pins, inherit the bootstrap read descriptor, leave target stdin attached, and remove SCM_RIGHTS stdin handoff. Keep any wrapper code needed to restore the target's signal mask while the waiting native executable retains blocked signals. MCP Console continues to own manager readiness, supervision, descendant retirement, temporary directories, terminal ownership, and signal delivery. Adoption in MCP Console is a separate change.
+
+Implementation commit: `cdce4a6dbd75802cc2747999f9ff1afa3329c6a3`, added after `093828701` on the existing branch. Validation used macOS 26.6.2 arm64 and an isolated worktree on the Ubuntu 24.04.4 x86_64 host `mule`, kernel `6.8.0-139-generic`. Both used the workspace Rust 1.95.0 and Bazel 9.0.0; Nextest was 0.9.118 on macOS and 0.9.103 on Linux. The Linux namespace prerequisite probe passed, with host bubblewrap 0.9.0 and libcap 2.66.
+
+| Check                                                 | macOS                                          | Linux                                             |
+| ----------------------------------------------------- | ---------------------------------------------- | ------------------------------------------------- |
+| Locked Cargo debug and release builds                 | Passed, offline                                | Passed; release offline, including ordinary bwrap |
+| Debug executable contracts, retries disabled          | 32 passed, 0 skipped; Nextest annotation below | 32 passed, 0 skipped                              |
+| Release executable contracts, retries disabled        | 32 passed, 0 skipped                           | 32 passed, 0 skipped, with release bwrap          |
+| Uncached Bazel executable contracts                   | 32 passed                                      | 32 passed                                         |
+| Native sandbox suites, retries disabled               | 92 passed, 2 existing failures, 0 skipped      | 207 passed, 0 skipped                             |
+| Python caller, debug and release                      | 1,048,832 binary input bytes preserved         | 1,048,832 binary input bytes preserved            |
+| Focused Clippy, all targets/features, warnings denied | Passed                                         | Passed                                            |
+| Argument-comment lint                                 | Passed                                         | Passed                                            |
+
+The macOS native failures are the two bash stderr-matching cases already recorded above. One concurrent debug run marked the passing direct-network contract `LEAK`. Three further bounded full-suite repetitions passed all 96 executions; two repetitions also had one `LEAK` annotation each, on managed-proxy and launch-failure contracts. The source of these intermittent Nextest output-lifetime annotations was not isolated. The bootstrap-resource and waiting-parent stdin-closure regressions passed throughout. No timeout, assertion, signal, or native-helper workaround was added.
+
+Linux Bazel initially found that two new argument-test loops reused a staging directory and tried to overwrite read-only copied executables. Giving each invocation its own staging directory corrected those failures; the subsequent complete Bazel suite passed. This preserves the existing separate-copy-process harness and native helper selection.
+
+`just fix -p codex-mcp-console-sandbox --locked`, `just fmt`, `cargo fmt --all -- --check`, Actionlint, Python Ruff format/lint, Markdown formatting, and `git diff --check` passed. Functional tests preceded the prescribed final fix/format pass; Clippy made no fixes. The argument-comment tool retains its upstream unknown-lint warnings, Rust formatting warns about its nightly-only import option, and the ordinary Linux bwrap build retains vendored C warnings. No dependencies changed, so lockfile regeneration was unnecessary. Hosted CI was not run; no push or workflow dispatch was performed. Earlier validation records remain unchanged.
+
 ## Updating to another release
 
 Start a new release branch and review the native interfaces before carrying forward the leaf and workflow. Keep the two workspace changes separate from leaf behavior. Regenerate Cargo and Bazel lock state after dependencies are settled, inspect every existing-file modification, and run the native and executable checks on both Linux and macOS. Windows compatibility remains outside scope.
@@ -128,6 +159,6 @@ cd ..
 git diff --check
 ```
 
-After dependency changes, also run `just bazel-lock-update` from the repository root and inspect the generated lockfiles. On macOS, omit the Linux helper packages and retain exactly the two native test exclusions listed above. Run the complete executable suite and the existing macOS release smoke test. Do not rerun functional tests merely because fix/format ran.
+After dependency changes, also run `just bazel-lock-update` from the repository root and inspect the generated lockfiles. On macOS, omit the Linux helper packages and retain exactly the two native test exclusions listed above. Run the complete executable suite against both debug and release native executables. Do not rerun functional tests merely because fix/format ran.
 
 Put the built debug bwrap on `PATH` only for the native tests: one unchanged test uses the host executable as a bundled fixture, which requires bundled capabilities. The runner contracts separately exercise suitable, unsuitable, missing, and no-`--argv0` host executables. Do not carry application-specific native policy rules or lifecycle machinery into the next release. Preserve the caller-supplied extension only after verifying the new native Seatbelt command shape and rerunning its executable contracts.
