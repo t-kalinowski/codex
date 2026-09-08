@@ -36,6 +36,7 @@ rust_test(
     srcs = [
         "src/codex.rs",
         "tests/bootstrap_contract.rs",
+        "tests/transport/transport_tests.rs",
     ],
     crate_root = "tests/bootstrap_contract.rs",
     data = [

@@ -3,6 +3,8 @@
 
 #[path = "../src/codex.rs"]
 mod codex;
+#[path = "transport/transport_tests.rs"]
+mod transport;
 
 use crate::codex::cargo_bin;
 use pretty_assertions::assert_eq;
@@ -20,7 +22,7 @@ use std::process::Stdio;
 
 fn request(command: &[&str]) -> Value {
     json!({
-        "version": 1,
+        "version": 2,
         "command": command,
         "cwd": std::env::current_dir().unwrap(),
         "environment": {},
@@ -32,11 +34,10 @@ fn request(command: &[&str]) -> Value {
     })
 }
 
-fn frame(request: &Value, input: &[u8]) -> Vec<u8> {
+fn frame(request: &Value) -> Vec<u8> {
     let payload = serde_json::to_vec(request).unwrap();
     let mut bytes = u32::try_from(payload.len()).unwrap().to_be_bytes().to_vec();
     bytes.extend(payload);
-    bytes.extend(input);
     bytes
 }
 
@@ -66,51 +67,75 @@ fn runner(directory: &Path) -> Command {
     };
     #[cfg(not(target_os = "linux"))]
     let _ = directory;
-    Command::new(executable)
+    let mut command = Command::new(executable);
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    command
 }
 
-fn run(bytes: Vec<u8>) -> Output {
+fn run(bytes: Vec<u8>, input: &[u8]) -> Output {
     let directory = tempfile::tempdir().unwrap();
-    run_command(runner(directory.path()), bytes)
+    run_command(runner(directory.path()), bytes, input)
 }
 
-fn run_command(mut command: Command, bytes: Vec<u8>) -> Output {
-    let mut child = command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut stdin = child.stdin.take().unwrap();
-    let writer = std::thread::spawn(move || stdin.write_all(&bytes));
-    let output = child.wait_with_output().unwrap();
-    // Rejected frames may close the pipe before the complete input is written.
-    if let Err(error) = writer.join().unwrap() {
-        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+fn spawn(command: &mut Command) -> (std::process::Child, std::io::PipeWriter) {
+    let (bootstrap, writer) = std::io::pipe().unwrap();
+    let child = spawn_with_bootstrap(command, &bootstrap);
+    drop(bootstrap);
+    (child, writer)
+}
+
+fn spawn_with_bootstrap(command: &mut Command, bootstrap: &impl AsRawFd) -> std::process::Child {
+    let raw = bootstrap.as_raw_fd();
+    command.args(["--bootstrap-fd", &raw.to_string()]);
+    // SAFETY: only the child changes its copy's flags, using async-signal-safe
+    // fcntl. The writer and other Rust descriptors remain close-on-exec.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::fcntl(raw, libc::F_SETFD, 0) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
     }
-    output
+    command.spawn().unwrap()
+}
+
+fn run_command(mut command: Command, bytes: Vec<u8>, input: &[u8]) -> Output {
+    let (mut child, mut bootstrap) = spawn(command.stdin(Stdio::piped()));
+    let mut stdin = child.stdin.take().unwrap();
+    std::thread::scope(|scope| {
+        let input_writer = scope.spawn(move || stdin.write_all(input));
+        let bootstrap_writer = scope.spawn(move || bootstrap.write_all(&bytes));
+        let output = child.wait_with_output().unwrap();
+        // Rejected requests may close either pipe before its writer finishes.
+        for writer in [input_writer, bootstrap_writer] {
+            if let Err(error) = writer.join().unwrap() {
+                assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+            }
+        }
+        output
+    })
 }
 
 #[test]
 fn valid_bootstrap_launches_one_command() {
-    let output = run(frame(&request(&["/bin/echo", "launched"]), &[]));
+    let output = run(frame(&request(&["/bin/echo", "launched"])), &[]);
     assert!(output.status.success(), "{output:?}");
     assert_eq!(output.stdout, b"launched\n");
     assert_eq!(output.stderr, b"");
 }
 
 #[test]
-fn stdin_starts_immediately_after_bootstrap() {
+fn binary_stdin_is_independent_of_bootstrap() {
     for size in [0, 1, 255, 4095, 4096, 8191, 8192, 65537, 1048576] {
         let sentinel: Vec<u8> = (0..size).map(|i| (i % 256) as u8).collect();
-        let output = run(frame(&fixture("stdout", &[]), &sentinel));
+        let output = run(frame(&fixture("stdout", &[])), &sentinel);
         assert!(output.status.success(), "size={size}: {output:?}");
         assert_eq!(output.stdout, sentinel, "size={size}");
         assert_eq!(output.stderr, b"");
     }
 }
 
-#[cfg(target_os = "linux")]
 #[test]
 fn concurrent_launches_preserve_independent_input() {
     const LAUNCHERS: usize = 8;
@@ -122,9 +147,15 @@ fn concurrent_launches_preserve_independent_input() {
                 start.wait();
                 for sequence in 0..4 {
                     let input = vec![(launcher * 4 + sequence) as u8; 8193];
-                    let output = run(frame(&fixture("stdout", &[]), &input));
+                    let tag = format!("{launcher}:{sequence}:");
+                    let mut request = fixture("tagged-stdin", &[]);
+                    request["environment"]["INPUT_TAG"] = json!(tag);
+                    let output = run(frame(&request), &input);
                     assert!(output.status.success(), "{output:?}");
-                    assert_eq!((output.stdout, output.stderr), (input, vec![]));
+                    assert_eq!(
+                        (output.stdout, output.stderr),
+                        ([tag.as_bytes(), &input].concat(), vec![])
+                    );
                 }
             });
         }
@@ -143,8 +174,10 @@ fn invalid_frames_fail_on_stderr_only() {
         u32::MAX.to_be_bytes().to_vec(),
         vec![0, 0, 0, 2, b'{'],
         vec![0, 0, 0, 1, b'{'],
+        vec![0, 0, 0, 1, 0xff],
+        vec![0, 0, 0, 4, b'{', b'}', b'{', b'}'],
     ] {
-        let output = run(bytes);
+        let output = run(bytes, &[]);
         assert!(!output.status.success());
         assert_eq!(output.stdout, b"");
         assert!(!output.stderr.is_empty());
@@ -153,10 +186,25 @@ fn invalid_frames_fail_on_stderr_only() {
 
 #[test]
 fn invalid_requests_fail_on_stderr_only() {
-    let mut unknown = request(&["/bin/true"]);
-    unknown["version"] = json!(2);
-    for request in [unknown, request(&[])] {
-        let output = run(frame(&request, &[]));
+    let valid = request(&["/bin/echo", "must-not-launch"]);
+    let mut requests = vec![request(&[]), request(&[""])];
+    for (field, value) in [
+        ("version", json!(1)),
+        ("version", json!(3)),
+        ("version", json!(-1)),
+        ("command", json!("/bin/true")),
+        ("cwd", json!("relative")),
+        ("unexpected", json!(true)),
+        ("filesystem", json!({"kind": "invalid"})),
+        ("network", json!("invalid")),
+        ("proxy", json!({"enabled": false})),
+    ] {
+        let mut request = valid.clone();
+        request[field] = value;
+        requests.push(request);
+    }
+    for request in requests {
+        let output = run(frame(&request), &[]);
         assert!(!output.status.success());
         assert_eq!(output.stdout, b"");
         assert!(!output.stderr.is_empty());
@@ -174,7 +222,7 @@ fn fixture(operation: &str, args: &[&str]) -> Value {
 fn binary_stdout_and_stderr_are_inherited() {
     let bytes: Vec<u8> = (0..131073).map(|i| (i % 256) as u8).collect();
     for operation in ["stdout", "stderr"] {
-        let output = run(frame(&fixture(operation, &[]), &bytes));
+        let output = run(frame(&fixture(operation, &[])), &bytes);
         assert!(output.status.success(), "{output:?}");
         let (actual, other) = if operation == "stdout" {
             (output.stdout, output.stderr)
@@ -197,7 +245,7 @@ fn cwd_and_complete_environment_reach_the_target() {
     let staging = tempfile::tempdir().unwrap();
     let mut command = runner(staging.path());
     command.env("NOT_FOR_TARGET", "runner-only");
-    let output = run_command(command, frame(&request, &[]));
+    let output = run_command(command, frame(&request), &[]);
     assert!(output.status.success(), "{output:?}");
     // Some macOS toolchains initialize __CF_USER_TEXT_ENCODING before main.
     // Compare the complete native process environment, including that behavior.
@@ -224,7 +272,7 @@ fn filesystem_policy_denies_and_grants_writes() {
     let root = directory.path().canonicalize().unwrap();
     let file = root.join("created");
     let mut request = fixture("write", &[file.to_str().unwrap()]);
-    let denied = run(frame(&request, &[]));
+    let denied = run(frame(&request), &[]);
     assert!(!denied.status.success(), "{denied:?}");
     assert!(!file.exists());
     request["filesystem"]["entries"]
@@ -233,7 +281,7 @@ fn filesystem_policy_denies_and_grants_writes() {
         .push(json!({
             "path": {"type": "path", "path": root}, "access": "write"
         }));
-    let allowed = run(frame(&request, &[]));
+    let allowed = run(frame(&request), &[]);
     assert!(allowed.status.success(), "{allowed:?}");
     assert_eq!(std::fs::read(file).unwrap(), b"created");
 }
@@ -241,12 +289,12 @@ fn filesystem_policy_denies_and_grants_writes() {
 #[test]
 fn exit_codes_and_native_signal_mapping_are_preserved() {
     for code in [0, 1, 42, 127, 255] {
-        let output = run(frame(&fixture("exit", &[&code.to_string()]), &[]));
+        let output = run(frame(&fixture("exit", &[&code.to_string()])), &[]);
         assert_eq!(output.status.code(), Some(code), "{output:?}");
         assert_eq!((output.stdout, output.stderr), (vec![], vec![]));
     }
     for signal in [libc::SIGTERM, libc::SIGKILL] {
-        let output = run(frame(&fixture("signal", &[&signal.to_string()]), &[]));
+        let output = run(frame(&fixture("signal", &[&signal.to_string()])), &[]);
         assert_eq!(output.status.code(), Some(128 + signal), "{output:?}");
         assert_eq!(output.stdout, b"");
     }
@@ -256,7 +304,7 @@ fn exit_codes_and_native_signal_mapping_are_preserved() {
 fn launch_failure_has_stderr_and_no_acknowledgment() {
     let directory = tempfile::tempdir().unwrap();
     let missing = directory.path().join("missing-program");
-    let output = run(frame(&request(&[missing.to_str().unwrap()]), &[]));
+    let output = run(frame(&request(&[missing.to_str().unwrap()])), &[]);
     assert!(!output.status.success());
     assert_eq!(output.stdout, b"");
     assert!(!output.stderr.is_empty());
@@ -295,7 +343,7 @@ fn no_launcher_or_proxy_descriptors_reach_the_target() {
         }
         let mut request = fixture("descriptors", &[]);
         request["proxy"] = proxy;
-        let output = run_command(command, frame(&request, &[]));
+        let output = run_command(command, frame(&request), &[]);
         assert!(output.status.success(), "{output:?}");
         assert_eq!(
             serde_json::from_slice::<Value>(&output.stdout).unwrap(),
@@ -309,10 +357,10 @@ fn network_permission_controls_direct_connections() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap().to_string();
     let mut request = fixture("connect", &[&address]);
-    let denied = run(frame(&request, &[]));
+    let denied = run(frame(&request), &[]);
     assert!(!denied.status.success(), "{denied:?}");
     request["network"] = json!("enabled");
-    let allowed = run(frame(&request, &[]));
+    let allowed = run(frame(&request), &[]);
     assert!(allowed.status.success(), "{allowed:?}");
 }
 
@@ -334,13 +382,13 @@ fn managed_proxy_applies_the_upstream_allowlist() {
     });
     let mut request = fixture("proxy-get", &[&format!("http://{address}/")]);
     request["proxy"] = proxy_config();
-    let output = run(frame(&request, &[]));
+    let output = run(frame(&request), &[]);
     assert!(output.status.success(), "{output:?}");
     assert!(output.stdout.ends_with(b"allowed"), "{output:?}");
     server.join().unwrap();
 
     request["proxy"]["domains"] = json!({"127.0.0.1": "deny"});
-    let denied = run(frame(&request, &[]));
+    let denied = run(frame(&request), &[]);
     assert!(denied.status.success(), "{denied:?}");
     assert!(
         String::from_utf8_lossy(&denied.stdout).starts_with("HTTP/1.1 403"),
@@ -354,7 +402,7 @@ fn ordinary_seatbelt_profile_retains_native_sysctl_denials() {
     // The removed application profile allowed this query. The ordinary process
     // profile permits hw.ncpu but denies kern.boottime.
     for (name, allowed) in [("hw.ncpu", true), ("kern.boottime", false)] {
-        let output = run(frame(&fixture("sysctl", &[name]), &[]));
+        let output = run(frame(&fixture("sysctl", &[name])), &[]);
         assert_eq!(output.status.success(), allowed, "{name}: {output:?}");
     }
 }
@@ -405,7 +453,7 @@ fn macos_seatbelt_profile_extension_preserves_pty_workflows() {
         if let Some(extension) = extension {
             request["macos_seatbelt_profile_extension"] = extension;
         }
-        let output = run(frame(&request, &[]));
+        let output = run(frame(&request), &[]);
         assert!(output.status.success(), "{output:?}");
         assert_eq!(output.stderr, b"");
         assert_eq!(
@@ -421,7 +469,7 @@ fn macos_seatbelt_profile_extension_can_grant_native_permissions() {
     let mut request = fixture("sysctl", &["kern.boottime"]);
     request["macos_seatbelt_profile_extension"] =
         json!(r#"(allow sysctl-read (sysctl-name "kern.boottime"))"#);
-    let output = run(frame(&request, &[]));
+    let output = run(frame(&request), &[]);
     assert!(output.status.success(), "{output:?}");
     assert_eq!((output.stdout, output.stderr), (vec![], vec![]));
 }
@@ -431,7 +479,7 @@ fn macos_seatbelt_profile_extension_can_grant_native_permissions() {
 fn malformed_macos_seatbelt_profile_extension_prevents_target_launch() {
     let mut request = request(&["/bin/echo", "launched"]);
     request["macos_seatbelt_profile_extension"] = json!("(invalid-sbpl-operation)");
-    let output = run(frame(&request, &[]));
+    let output = run(frame(&request), &[]);
     assert!(!output.status.success(), "{output:?}");
     assert_eq!(output.stdout, b"");
     assert!(String::from_utf8_lossy(&output.stderr).contains("invalid-sbpl-operation"));
@@ -442,7 +490,7 @@ fn malformed_macos_seatbelt_profile_extension_prevents_target_launch() {
 fn macos_seatbelt_profile_extension_is_rejected_on_linux() {
     let mut request = request(&["/bin/echo", "launched"]);
     request["macos_seatbelt_profile_extension"] = json!("(deny network*)");
-    let output = run(frame(&request, &[]));
+    let output = run(frame(&request), &[]);
     assert!(!output.status.success(), "{output:?}");
     assert_eq!(output.stdout, b"");
     assert!(
@@ -457,8 +505,7 @@ fn maximum_frame_and_prequeued_input_remain_separate() {
     payload.resize(1048576, b' ');
     let mut bytes = 1048576u32.to_be_bytes().to_vec();
     bytes.extend(payload);
-    bytes.extend_from_slice(b"\0sentinel\xff");
-    let output = run(bytes);
+    let output = run(bytes, b"\0sentinel\xff");
     assert!(output.status.success(), "{output:?}");
     assert_eq!(output.stdout, b"\0sentinel\xff");
     assert_eq!(output.stderr, b"");
@@ -467,19 +514,14 @@ fn maximum_frame_and_prequeued_input_remain_separate() {
 #[test]
 fn launch_does_not_wait_for_more_input_or_eof() {
     let staging = tempfile::tempdir().unwrap();
-    let mut child = runner(staging.path())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut stdin = child.stdin.take().unwrap();
-    stdin
-        .write_all(&frame(&request(&["/bin/echo", "started"]), &[]))
+    let (mut child, mut bootstrap) = spawn(runner(staging.path()).stdin(Stdio::piped()));
+    let stdin = child.stdin.take().unwrap();
+    bootstrap
+        .write_all(&frame(&request(&["/bin/echo", "started"])))
         .unwrap();
     let output = child.wait_with_output().unwrap();
-    // Keep the caller's stdin open until the target has exited.
-    drop(stdin);
+    // Neither channel needs EOF, and stdin has no data throughout setup.
+    drop((stdin, bootstrap));
     assert!(output.status.success(), "{output:?}");
     assert_eq!(output.stdout, b"started\n");
 }
@@ -497,7 +539,7 @@ fn linux_prefers_a_suitable_host_bwrap() {
     );
     let mut request = request(&["/bin/echo", "target"]);
     request["environment"]["PATH"] = json!(host);
-    let output = run_command(command, frame(&request, &[]));
+    let output = run_command(command, frame(&request), &[]);
     assert_eq!(output.status.code(), Some(97), "{output:?}");
     assert_eq!(output.stdout, b"");
 }
@@ -518,7 +560,7 @@ fn linux_uses_the_ordinary_bundle_when_host_bwrap_is_missing_or_unsuitable() {
         }
         let mut request = request(&["/bin/echo", "target"]);
         request["environment"] = json!({"PATH": host, "TEST_BWRAP_UNSUITABLE": "1"});
-        let output = run_command(command, frame(&request, &[]));
+        let output = run_command(command, frame(&request), &[]);
         assert!(output.status.success(), "{output:?}");
         assert_eq!(output.stdout, b"target\n");
         assert_eq!(output.stderr, b"");
@@ -542,7 +584,7 @@ fn linux_host_bwrap_without_argv0_can_reexec_the_native_helper() {
         "TEST_BWRAP_NO_ARGV0": "1",
         "TEST_BWRAP_EXECUTABLE": cargo_bin("bwrap").unwrap()
     });
-    let output = run_command(command, frame(&request, &[]));
+    let output = run_command(command, frame(&request), &[]);
     assert!(output.status.success(), "{output:?}");
     assert_eq!(output.stdout, b"target\n");
     assert_eq!(output.stderr, b"");

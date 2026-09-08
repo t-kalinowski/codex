@@ -35,13 +35,59 @@ fn main() -> anyhow::Result<()> {
     }
     let operation = args.next().context("fixture operation")?;
     match operation.as_str() {
-        "stdout" | "stderr" => {
+        "close-stdin" => {
+            use std::fs::File;
+            use std::os::fd::FromRawFd;
+
+            // SAFETY: this fixture owns stdin and uses its readable stderr as
+            // a test gate. Neither descriptor is otherwise adopted or read.
+            let mut gate = unsafe {
+                drop(File::from_raw_fd(libc::STDIN_FILENO));
+                File::from_raw_fd(libc::STDERR_FILENO)
+            };
+            std::io::stdout().write_all(b"closed")?;
+            std::io::stdout().flush()?;
+            gate.read_exact(&mut [0])?;
+        }
+        "stdin-file" | "stdin-identity" => {
+            use std::fs::File;
+            use std::io::IsTerminal;
+            use std::io::Seek;
+            use std::io::SeekFrom;
+            use std::os::fd::FromRawFd;
+            use std::os::unix::fs::MetadataExt;
+
+            // SAFETY: the fixture adopts its stdin once and does not use Stdin.
+            let mut stdin = unsafe { File::from_raw_fd(libc::STDIN_FILENO) };
+            let result = if operation == "stdin-file" {
+                let offset = stdin.stream_position()?;
+                let mut tail = Vec::new();
+                stdin.read_to_end(&mut tail)?;
+                stdin.seek(SeekFrom::Start(1))?;
+                serde_json::json!({"offset": offset, "tail": tail})
+            } else {
+                let metadata = stdin.metadata()?;
+                serde_json::json!({
+                    "dev": metadata.dev(), "ino": metadata.ino(),
+                    "rdev": metadata.rdev(), "tty": stdin.is_terminal()
+                })
+            };
+            serde_json::to_writer(std::io::stdout(), &result)?;
+        }
+        "stdout" | "stderr" | "ready-stdin" | "tagged-stdin" => {
+            if operation == "ready-stdin" {
+                std::io::stdout().write_all(b"ready")?;
+                std::io::stdout().flush()?;
+            }
             let mut input = Vec::new();
             std::io::stdin().read_to_end(&mut input)?;
-            if operation == "stdout" {
-                std::io::stdout().write_all(&input)?;
-            } else {
+            if operation == "tagged-stdin" {
+                std::io::stdout().write_all(std::env::var("INPUT_TAG")?.as_bytes())?;
+            }
+            if operation == "stderr" {
                 std::io::stderr().write_all(&input)?;
+            } else {
+                std::io::stdout().write_all(&input)?;
             }
         }
         "context" => {

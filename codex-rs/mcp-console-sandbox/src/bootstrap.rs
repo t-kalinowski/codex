@@ -26,13 +26,45 @@ pub struct Bootstrap {
     pub macos_seatbelt_profile_extension: Option<String>,
 }
 
-pub fn read() -> Result<(Bootstrap, File)> {
-    // SAFETY: this executable takes ownership of fd 0 exactly once. File has no
-    // read-ahead buffer; read_exact requests only the bytes still in each slice.
-    // The same open file description is then transferred to the child as stdin.
-    let mut stdin = unsafe { File::from_raw_fd(libc::STDIN_FILENO) };
+pub fn take_inherited() -> Result<File> {
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    ensure!(
+        args.len() == 2 && args[0] == "--bootstrap-fd",
+        "expected --bootstrap-fd <N>"
+    );
+    let number = args[1].to_str().context("bootstrap fd must be decimal")?;
+    ensure!(
+        !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit()),
+        "bootstrap fd must be decimal"
+    );
+    let fd: libc::c_int = number.parse().context("bootstrap fd is out of range")?;
+    ensure!(
+        fd > libc::STDERR_FILENO,
+        "bootstrap fd must be greater than 2"
+    );
+    // Validate before opening any files or creating the runtime: a closed
+    // caller fd must not become valid through reuse by our own setup.
+    // SAFETY: F_GETFL only queries this process's descriptor; it does not adopt it.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(std::io::Error::last_os_error()).context("invalid bootstrap fd");
+    }
+    ensure!(
+        flags & libc::O_ACCMODE != libc::O_WRONLY,
+        "bootstrap fd must be readable"
+    );
+    #[cfg(target_os = "linux")]
+    ensure!(flags & libc::O_PATH == 0, "bootstrap fd must be readable");
+    // SAFETY: fd is an open inherited descriptor above stdio, validated before
+    // any other descriptor allocation. This is its sole adoption; File owns it
+    // on both success and error paths. No other code closes or adopts this fd.
+    Ok(unsafe { File::from_raw_fd(fd) })
+}
+
+pub fn read(mut bootstrap: File) -> Result<Bootstrap> {
+    // File/read_exact consumes only the declared frame, without waiting for EOF.
     let mut header = [0; 4];
-    stdin
+    bootstrap
         .read_exact(&mut header)
         .context("read bootstrap length")?;
     let size = u32::from_be_bytes(header) as usize;
@@ -41,12 +73,12 @@ pub fn read() -> Result<(Bootstrap, File)> {
         "bootstrap length must be 1..=1048576 bytes"
     );
     let mut payload = vec![0; size];
-    stdin
+    bootstrap
         .read_exact(&mut payload)
         .context("read bootstrap payload")?;
     let request: Bootstrap = serde_json::from_slice(&payload).context("invalid bootstrap JSON")?;
     ensure!(
-        request.version == 1,
+        request.version == 2,
         "unsupported bootstrap version {}",
         request.version
     );
@@ -57,5 +89,7 @@ pub fn read() -> Result<(Bootstrap, File)> {
             .is_some_and(|program| !program.is_empty()),
         "command must contain a program"
     );
-    Ok((request, stdin))
+    // The one-shot gate is closed before proxy, runtime, or native setup.
+    drop(bootstrap);
+    Ok(request)
 }

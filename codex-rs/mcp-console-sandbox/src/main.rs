@@ -34,11 +34,10 @@ fn main() {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn run() -> anyhow::Result<std::process::ExitStatus> {
-    use anyhow::ensure;
-    ensure!(
-        std::env::args_os().len() == 1,
-        "expected one bootstrap frame on stdin, no arguments"
-    );
+    use std::fs::File;
+    use std::os::fd::FromRawFd;
+
+    let bootstrap = bootstrap::take_inherited()?;
     // Enumerate before creating the runtime or invoking native setup. This
     // also prevents a caller's accidentally inherited control pipe from
     // reaching the target. New Rust/Tokio descriptors are close-on-exec.
@@ -60,7 +59,10 @@ fn run() -> anyhow::Result<std::process::ExitStatus> {
             }
         }
     }
-    let (request, stdin) = bootstrap::read()?;
+    let request = bootstrap::read(bootstrap)?;
+    // SAFETY: this executable owns fd 0 and adopts it exactly once, without
+    // reading it. Rust startup supplies /dev/null if it was closed at invocation.
+    let stdin = unsafe { File::from_raw_fd(libc::STDIN_FILENO) };
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?

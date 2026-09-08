@@ -119,16 +119,17 @@ pub async fn run(request: Bootstrap, stdin: File) -> Result<ExitStatus> {
             .envs(prepared.env);
         // Keep the real executable path in argv[0]. Native bwrap's no-argv0
         // compatibility path re-execs that path; main dispatches helper args.
-        command
+        let mut child = command
             .stdin(Stdio::from(stdin))
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
             .kill_on_drop(true)
             .spawn()
-            .context("launch native sandbox")?
-            .wait()
-            .await
-            .context("wait for native sandbox")
+            .context("launch native sandbox")?;
+        // Command retains the owned stdin after spawn. Release our reader
+        // before waiting so the target's input closure can reach its writer.
+        drop(command);
+        child.wait().await.context("wait for native sandbox")
     }
     .await;
     if let Some(handle) = handle {
