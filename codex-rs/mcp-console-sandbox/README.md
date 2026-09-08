@@ -28,6 +28,7 @@ The no-argument invocation is rejected.
 Configuration is read exclusively from the bootstrap descriptor, which is closed before native setup.
 There is no descriptor transfer after process creation.
 Target stdin keeps its original open file description; the waiting executable releases its input copy after spawning the child.
+On Linux, the native helpers transfer that description through an extra inherited descriptor and release their input copies, so target-side closure is visible to the caller while the target is still running.
 
 Stdout and stderr belong to the target.
 Configuration or launch failures use stderr and a nonzero exit.

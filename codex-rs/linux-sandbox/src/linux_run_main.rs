@@ -134,6 +134,10 @@ pub struct LandlockCommand {
     #[arg(long = "proxy-route-spec", hide = true)]
     pub proxy_route_spec: Option<String>,
 
+    /// Original stdin inherited through bubblewrap without its monitor retaining a reader.
+    #[arg(long = "stdin-fd", hide = true)]
+    pub stdin_fd: Option<libc::c_int>,
+
     /// Inherited fallback mounts that must be authenticated before sandboxed code runs.
     #[arg(long = "verify-fd-mount", hide = true)]
     pub verify_fd_mounts: Vec<String>,
@@ -166,12 +170,25 @@ pub fn run_main() -> ! {
         allow_network_for_proxy,
         proxy_route_spec,
         verify_fd_mounts,
+        stdin_fd,
         no_proc,
         command,
     } = LandlockCommand::parse();
 
     if command.is_empty() {
         panic!("No command specified to execute.");
+    }
+    if let Some(fd) = stdin_fd {
+        assert!(
+            apply_seccomp_then_exec && fd > libc::STDERR_FILENO,
+            "stdin fd requires the inner sandbox stage"
+        );
+        assert!(
+            unsafe { libc::dup2(fd, libc::STDIN_FILENO) } >= 0,
+            "restore sandbox command stdin: {}",
+            std::io::Error::last_os_error()
+        );
+        close_fd_or_panic(fd, "close transferred sandbox stdin");
     }
     if !apply_seccomp_then_exec && !verify_fd_mounts.is_empty() {
         panic!("--verify-fd-mount is only supported in the inner sandbox stage");
@@ -252,6 +269,9 @@ pub fn run_main() -> ! {
             exec_or_panic(command);
         }
 
+        // Only the command owns its input after fork. Retaining a reader here
+        // would hide command-side stdin closure from the caller's writer.
+        close_fd_or_panic(libc::STDIN_FILENO, "release namespace init stdin");
         let signal_forwarders = install_bwrap_signal_forwarders(command_pid);
         signal_mask.restore();
         loop {
@@ -597,6 +617,7 @@ fn run_bwrap_in_child_with_synthetic_mount_cleanup(bwrap_args: crate::bwrap::Bwr
         exec_bwrap(args, preserved_files);
     }
 
+    close_fd_or_panic(libc::STDIN_FILENO, "release bubblewrap supervisor stdin");
     close_child_exec_start_read(exec_start_pipe[0]);
     let protected_create_monitor = ProtectedCreateMonitor::start(&protected_create_targets);
     let signal_forwarders = install_bwrap_signal_forwarders(pid);

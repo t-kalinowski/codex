@@ -358,10 +358,7 @@ fn waiting_executable_releases_target_stdin() {
         }
     }
     let mut request = fixture("close-stdin", &[]);
-    // Linux's restricted-filesystem helpers can themselves retain stdin. Use
-    // the native seccomp-only path to isolate this executable's ownership.
-    // The filesystem and host-bwrap contracts still exercise the full path.
-    request["filesystem"] = json!({"kind": "unrestricted"});
+    request["environment"] = json!({"PATH": std::env::var("PATH").unwrap()});
     bootstrap.write_all(&frame(&request)).unwrap();
     let mut ready = [0; 6];
     child

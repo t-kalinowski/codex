@@ -1,6 +1,8 @@
 use std::ffi::CStr;
 use std::ffi::CString;
 use std::fs::File;
+use std::os::fd::AsRawFd;
+use std::os::fd::FromRawFd;
 use std::os::raw::c_char;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
@@ -35,7 +37,39 @@ struct SystemBwrapCapabilities {
     supports_ro_bind_fd: bool,
 }
 
-pub(crate) fn exec_bwrap(mut argv: Vec<String>, preserved_files: Vec<File>) -> ! {
+pub(crate) fn exec_bwrap(mut argv: Vec<String>, mut preserved_files: Vec<File>) -> ! {
+    let separator = argv
+        .iter()
+        .position(|arg| arg == "--")
+        .unwrap_or_else(|| panic!("missing bubblewrap command"));
+    if let Some(offset) = argv[separator + 1..]
+        .iter()
+        .take_while(|arg| *arg != "--")
+        .position(|arg| arg == "--apply-seccomp-then-exec")
+    {
+        // Bubblewrap's host monitor retains fd 0 but closes extra descriptors.
+        // Carry the original input through an extra fd so only the inner
+        // command inherits its open file description, including seek offsets.
+        let fd = unsafe { libc::fcntl(libc::STDIN_FILENO, libc::F_DUPFD_CLOEXEC, 3) };
+        assert!(
+            fd >= 0,
+            "duplicate sandbox stdin: {}",
+            std::io::Error::last_os_error()
+        );
+        let stdin = unsafe { File::from_raw_fd(fd) };
+        let null = File::open("/dev/null")
+            .unwrap_or_else(|error| panic!("open null stdin for bubblewrap monitor: {error}"));
+        assert!(
+            unsafe { libc::dup2(null.as_raw_fd(), libc::STDIN_FILENO) } >= 0,
+            "detach bubblewrap monitor stdin: {}",
+            std::io::Error::last_os_error()
+        );
+        argv.splice(
+            separator + 1 + offset..separator + 1 + offset,
+            ["--stdin-fd".to_string(), fd.to_string()],
+        );
+        preserved_files.push(stdin);
+    }
     argv.insert(1, "--as-pid-1".to_string());
 
     match preferred_bwrap_launcher() {
