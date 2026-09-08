@@ -35,6 +35,22 @@ fn main() -> anyhow::Result<()> {
     }
     let operation = args.next().context("fixture operation")?;
     match operation.as_str() {
+        "local-ipc" => {
+            use std::net::Shutdown;
+            use std::os::unix::net::UnixStream;
+            use std::time::Duration;
+
+            let (mut writer, mut reader) = UnixStream::pair()?;
+            assert!(writer.local_addr()?.is_unnamed());
+            assert!(reader.peer_addr()?.is_unnamed());
+            assert!(reader.take_error()?.is_none());
+            reader.set_read_timeout(Some(Duration::from_secs(5)))?;
+            writer.write_all(b"local IPC")?;
+            writer.shutdown(Shutdown::Write)?;
+            let mut received = Vec::new();
+            reader.read_to_end(&mut received)?;
+            std::io::stdout().write_all(&received)?;
+        }
         "close-stdin" => {
             use std::fs::File;
             use std::os::fd::FromRawFd;

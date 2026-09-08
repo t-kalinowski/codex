@@ -589,3 +589,15 @@ fn linux_host_bwrap_without_argv0_can_reexec_the_native_helper() {
     assert_eq!(output.stdout, b"target\n");
     assert_eq!(output.stderr, b"");
 }
+
+#[test]
+fn restricted_network_preserves_local_socket_pair_operations() {
+    let fixture = cargo_bin("mcp-console-sandbox-fixture").unwrap();
+    let mut request = request(&[fixture.to_str().unwrap(), "local-ipc"]);
+    // Use the suitable host helper when present, just as an installed caller does.
+    request["environment"] = json!({"PATH": std::env::var("PATH").unwrap()});
+    let output = run(frame(&request), &[]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, b"local IPC");
+    assert_eq!(output.stderr, b"");
+}
