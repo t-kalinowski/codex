@@ -3,6 +3,16 @@
 
 #[path = "../src/codex.rs"]
 mod codex;
+#[path = "lifecycle/config_tests.rs"]
+mod configuration;
+#[path = "lifecycle/lifecycle_tests.rs"]
+mod lifecycle;
+#[path = "lifecycle/security_tests.rs"]
+mod security;
+#[path = "lifecycle/startup_tests.rs"]
+mod startup;
+#[path = "lifecycle/terminal_tests.rs"]
+mod terminal;
 #[path = "transport/transport_tests.rs"]
 mod transport;
 

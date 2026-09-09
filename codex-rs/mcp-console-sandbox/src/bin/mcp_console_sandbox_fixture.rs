@@ -35,6 +35,15 @@ fn main() -> anyhow::Result<()> {
     }
     let operation = args.next().context("fixture operation")?;
     match operation.as_str() {
+        "foreground-peer" => terminal::peer(args)?,
+        "terminal" => terminal::target(&args.next().context("terminal kind")?)?,
+        "adversary" => security::adversary()?,
+        "survivor" => security::survivor(
+            args.next().context("forbidden path")?,
+            args.next().context("host address")?,
+        )?,
+        "owner" => owner::run(args.next().context("runner executable")?)?,
+        "lifecycle" => lifecycle::run(&args.next().context("lifecycle operation")?)?,
         "local-ipc" => {
             use std::net::Shutdown;
             use std::os::unix::net::UnixStream;
@@ -247,3 +256,15 @@ fn main() -> anyhow::Result<()> {
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn main() {}
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[path = "fixtures/lifecycle.rs"]
+mod lifecycle;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[path = "fixtures/owner.rs"]
+mod owner;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[path = "fixtures/security.rs"]
+mod security;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[path = "fixtures/terminal.rs"]
+mod terminal;
