@@ -45,20 +45,46 @@ fn main() -> anyhow::Result<()> {
         "owner" => owner::run(args.next().context("runner executable")?)?,
         "lifecycle" => lifecycle::run(&args.next().context("lifecycle operation")?)?,
         "local-ipc" => {
+            use std::fs::File;
             use std::net::Shutdown;
+            use std::os::fd::OwnedFd;
             use std::os::unix::net::UnixStream;
             use std::time::Duration;
 
-            let (mut writer, mut reader) = UnixStream::pair()?;
-            assert!(writer.local_addr()?.is_unnamed());
-            assert!(reader.peer_addr()?.is_unnamed());
-            assert!(reader.take_error()?.is_none());
-            reader.set_read_timeout(Some(Duration::from_secs(5)))?;
+            let (mut writer, reader) = UnixStream::pair()?;
+            let operations: std::collections::BTreeMap<_, _> = [
+                ("getsockname", writer.local_addr().map(|_| ())),
+                ("getpeername", reader.peer_addr().map(|_| ())),
+                ("getsockopt", reader.take_error().map(|_| ())),
+                (
+                    "setsockopt",
+                    reader.set_read_timeout(Some(Duration::from_secs(5))),
+                ),
+                ("send", writer.write_all(b"probe")),
+                ("shutdown", writer.shutdown(Shutdown::Write)),
+            ]
+            .into_iter()
+            .map(|(name, result)| {
+                (
+                    name,
+                    result.err().map(|error| error.raw_os_error().unwrap_or(-1)),
+                )
+            })
+            .collect();
+
+            // Descriptor I/O on a socketpair remains usable without the
+            // socket-specific calls above. Closing the writer supplies EOF.
+            let (writer, reader) = UnixStream::pair()?;
+            let mut writer = File::from(OwnedFd::from(writer));
+            let mut reader = File::from(OwnedFd::from(reader));
             writer.write_all(b"local IPC")?;
-            writer.shutdown(Shutdown::Write)?;
+            drop(writer);
             let mut received = Vec::new();
             reader.read_to_end(&mut received)?;
-            std::io::stdout().write_all(&received)?;
+            serde_json::to_writer(
+                std::io::stdout(),
+                &serde_json::json!({"operations": operations, "bytes": received}),
+            )?;
         }
         "close-stdin" => {
             use std::fs::File;

@@ -601,13 +601,30 @@ fn linux_host_bwrap_without_argv0_can_reexec_the_native_helper() {
 }
 
 #[test]
-fn restricted_network_preserves_local_socket_pair_operations() {
+fn restricted_network_preserves_native_socket_denials_and_descriptor_io() {
     let fixture = cargo_bin("mcp-console-sandbox-fixture").unwrap();
     let mut request = request(&[fixture.to_str().unwrap(), "local-ipc"]);
     // Use the suitable host helper when present, just as an installed caller does.
     request["environment"] = json!({"PATH": std::env::var("PATH").unwrap()});
     let output = run(frame(&request), &[]);
     assert!(output.status.success(), "{output:?}");
-    assert_eq!(output.stdout, b"local IPC");
+    #[cfg(target_os = "linux")]
+    let denied = json!(libc::EPERM);
+    #[cfg(target_os = "macos")]
+    let denied = serde_json::Value::Null;
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(),
+        json!({
+            "operations": {
+                "getsockname": denied,
+                "getpeername": denied,
+                "getsockopt": denied,
+                "setsockopt": denied,
+                "send": denied,
+                "shutdown": denied,
+            },
+            "bytes": b"local IPC",
+        }),
+    );
     assert_eq!(output.stderr, b"");
 }

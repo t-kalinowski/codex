@@ -4,6 +4,7 @@ use anyhow::Result;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashMap;
+use std::fs::File;
 use std::io::Read;
 use std::io::Write;
 #[cfg(target_os = "macos")]
@@ -30,7 +31,9 @@ pub struct Seatbelt {
 }
 
 fn accept(descriptor: OwnedFd) -> Result<TargetSetup> {
-    let mut stream = UnixStream::from(descriptor);
+    // The upstream restricted filter allows descriptor read/write, but denies
+    // the sendto syscall used by UnixStream::write on Linux.
+    let mut stream = File::from(descriptor);
     // Linux SO_PASSCRED supplies the namespace init's host PID to the supervisor.
     stream.write_all(&[1])?;
     let mut length = [0; 4];

@@ -190,24 +190,18 @@ fn install_network_seccomp_filter_on_current_thread(
             deny_syscall(&mut rules, libc::SYS_accept4);
             deny_syscall(&mut rules, libc::SYS_bind);
             deny_syscall(&mut rules, libc::SYS_listen);
-            // Connected local IPC uses send(), which is sendto() with a null
-            // destination on Linux. Keep explicit destination sends denied;
-            // socket creation and connect/bind still prohibit network access.
-            rules.insert(
-                libc::SYS_sendto,
-                vec![SeccompRule::new(vec![SeccompCondition::new(
-                    4, // destination address
-                    SeccompCmpArgLen::Qword,
-                    SeccompCmpOp::Ne,
-                    0,
-                )?])?],
-            );
+            deny_syscall(&mut rules, libc::SYS_getpeername);
+            deny_syscall(&mut rules, libc::SYS_getsockname);
+            deny_syscall(&mut rules, libc::SYS_shutdown);
+            deny_syscall(&mut rules, libc::SYS_sendto);
             deny_syscall(&mut rules, libc::SYS_sendmmsg);
             // NOTE: allowing recvfrom allows some tools like: `cargo clippy`
             // to run with their socketpair + child processes for sub-proc
             // management.
             // deny_syscall(&mut rules, libc::SYS_recvfrom);
             deny_syscall(&mut rules, libc::SYS_recvmmsg);
+            deny_syscall(&mut rules, libc::SYS_getsockopt);
+            deny_syscall(&mut rules, libc::SYS_setsockopt);
 
             // For `socket` we allow AF_UNIX (arg0 == AF_UNIX) and deny
             // everything else.
