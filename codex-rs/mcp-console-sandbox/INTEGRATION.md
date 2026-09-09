@@ -4,6 +4,8 @@ This continuation starts at `3ee7d3190983b482b312ddfc3201c464179a1245` on the ex
 
 The [capability inventory](CAPABILITIES.md) describes the complete branch's additions over upstream. The integration table below includes the earlier Linux stdin changes as well as the lifecycle continuation. The earlier socket-operation relaxation has been removed; `linux-sandbox/src/landlock.rs` matches the pinned release exactly.
 
+[PR266.md](PR266.md) records the subsequent retirement, startup-cancellation and Linux prerequisite fixes, their red/green evidence, host validation limits and remaining Console work. Those changes retain the integration surface below. In the Linux native hook, expected procfs/setup failures now return a diagnostic and nonzero exit instead of panicking; the prerequisite rejection and enforcement order remain unchanged.
+
 ## Self-contained additions
 
 The runner owns configuration, signal capture/restoration, lifecycle sequencing, native gate payloads, temporary storage, and platform kernel operations in its own `src/` files. `launch.rs` shares sequencing; `platform_macos.rs` and `platform_linux.rs` contain only the operations that differ. Tests, fixtures, the protocol, and [behavior mapping](LIFECYCLE.md#executable-acceptance-tests) stay in this package.

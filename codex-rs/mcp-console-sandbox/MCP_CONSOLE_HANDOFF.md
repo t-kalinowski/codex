@@ -1,5 +1,7 @@
 # MCP Console handoff: sideband I/O with upstream Linux restrictions
 
+For PR #266, use the newer implementation pin and validation record in [PR266.md](PR266.md). The sideband work below remains a separate Console task; this runner work does not change Console production code or tests.
+
 Update MCP Console to use the standalone supervisor and make its relay-to-worker sideband work under the pinned upstream Linux network policy. The runner's socket-operation relaxation has been removed. Keep that policy unchanged during integration.
 
 Reference checkout: MCP Console main `c3027d71a86f837804ff3234dd1fab5c9103ff40`. At that revision, `sandbox-runner.json` pins `3ee7d3190983b482b312ddfc3201c464179a1245`, protocol 2. Adopt runner commit `270b25515f305d30f5889d815014cd4756d12f5a` from `t-kalinowski/codex`, branch `mcp-console/sandbox-runner/rust-v0.150.1`, keeping protocol 2 and rebuilding the staged artifacts. This note specifies work in MCP Console; no Console source, tests, or snapshots were changed while preparing it.
