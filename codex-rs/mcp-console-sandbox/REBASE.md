@@ -1,6 +1,6 @@
 # Rolling native sandbox extraction
 
-The current standalone lifecycle and its three additional upstream integration files are described in [INTEGRATION.md](INTEGRATION.md). The sections below record the earlier extraction and descriptor-transport stages; statements about caller-owned supervision and unchanged native entry points describe those earlier stages.
+The current branch's added capabilities are listed in [CAPABILITIES.md](CAPABILITIES.md), and its five native integration files are described in [INTEGRATION.md](INTEGRATION.md). The sections below record the earlier extraction and descriptor-transport stages; statements about caller-owned supervision and unchanged native entry points describe those earlier stages.
 
 This branch is based on `rust-v0.150.1`, commit `90854393966b21e9ebfd21b122334eb09a20c93d`. The one-shot correction starts after `b4de42be4e329fd6df06e6755b99f37f4a7ff5c6`. Earlier commits remain in the history; the correction is expressed entirely as additional commits.
 

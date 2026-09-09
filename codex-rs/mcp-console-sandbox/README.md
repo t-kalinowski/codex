@@ -17,6 +17,8 @@ It retires descendants before removing optional private storage and reporting co
 Parent-death retirement and SIGTERM retirement are explicit options; application restart and recovery remain caller responsibilities.
 There is no persistent control channel or target stream protocol.
 
+See [What this patch set adds to the native sandbox](CAPABILITIES.md) for the complete inventory of added capabilities, additional restrictions, compatibility changes, and reused upstream behavior.
+
 ## Invocation
 
 For an exec-style frontend, put JSON in one explicitly selected child environment variable:
