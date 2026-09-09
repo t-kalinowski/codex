@@ -3,12 +3,32 @@ mod bootstrap;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod codex;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+mod config;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod launch;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod native;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod platform;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod signals;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod storage;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn main() {
+    #[cfg(target_os = "macos")]
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--native-macos")) {
+        if let Err(error) = native::macos_main() {
+            eprintln!("mcp-console-sandbox: {error:#}");
+        }
+        std::process::exit(1);
+    }
     #[cfg(target_os = "linux")]
-    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--sandbox-policy-cwd")) {
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|arg| arg == "--target-setup-fd" || arg == "--sandbox-policy-cwd")
+    {
         // SandboxManager emits this leading option for the native helper.
         // Dispatch by its arguments so argv[0] can remain an executable path
         // when a host bwrap lacks --argv0. Helper re-execs must also retain the
@@ -17,13 +37,7 @@ fn main() {
     }
     let result = run();
     let code = match result {
-        Ok(status) => {
-            use std::os::unix::process::ExitStatusExt;
-            // Match the native CLI's exit_status::handle_exit_status mapping.
-            status
-                .code()
-                .unwrap_or_else(|| status.signal().map_or(1, |signal| 128 + signal))
-        }
+        Ok(status) => status,
         Err(error) => {
             eprintln!("mcp-console-sandbox: {error:#}");
             1
@@ -33,11 +47,12 @@ fn main() {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn run() -> anyhow::Result<std::process::ExitStatus> {
+fn run() -> anyhow::Result<i32> {
     use std::fs::File;
     use std::os::fd::FromRawFd;
 
-    let bootstrap = bootstrap::take_inherited()?;
+    let signals = signals::Signals::install()?;
+    let input = bootstrap::take_input()?;
     // Enumerate before creating the runtime or invoking native setup. This
     // also prevents a caller's accidentally inherited control pipe from
     // reaching the target. New Rust/Tokio descriptors are close-on-exec.
@@ -59,14 +74,17 @@ fn run() -> anyhow::Result<std::process::ExitStatus> {
             }
         }
     }
-    let request = bootstrap::read(bootstrap)?;
+    let request = match input {
+        bootstrap::Input::Descriptor(file) => bootstrap::read(file, &signals)?,
+        bootstrap::Input::Environment(request) => *request,
+    };
     // SAFETY: this executable owns fd 0 and adopts it exactly once, without
     // reading it. Rust startup supplies /dev/null if it was closed at invocation.
     let stdin = unsafe { File::from_raw_fd(libc::STDIN_FILENO) };
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?
-        .block_on(launch::run(request, stdin))
+        .block_on(launch::run(request, stdin, signals))
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
