@@ -7,6 +7,8 @@ mod codex;
 mod configuration;
 #[path = "lifecycle/lifecycle_tests.rs"]
 mod lifecycle;
+#[path = "lifecycle/retirement_tests.rs"]
+mod retirement;
 #[path = "lifecycle/security_tests.rs"]
 mod security;
 #[path = "lifecycle/startup_tests.rs"]

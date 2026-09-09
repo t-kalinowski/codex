@@ -15,6 +15,7 @@ struct Identity {
 struct Process {
     identity: Identity,
     parent: i32,
+    group: i32,
     zombie: bool,
 }
 
@@ -40,6 +41,7 @@ fn process(pid: i32) -> io::Result<Option<Process>> {
                 microseconds: info.pbi_start_tvusec,
             },
             parent: info.pbi_ppid as i32,
+            group: info.pbi_pgid as i32,
             zombie: info.pbi_status == libc::SZOMB,
         }));
     }
@@ -113,6 +115,7 @@ impl Parent {
 pub struct Tracker {
     queue: OwnedFd,
     active: HashMap<i32, Identity>,
+    root: Option<Identity>,
 }
 impl Tracker {
     pub fn new() -> io::Result<Self> {
@@ -127,10 +130,16 @@ impl Tracker {
         Ok(Self {
             queue,
             active: HashMap::new(),
+            root: None,
         })
     }
 
     pub fn track_root(&mut self, pid: i32) -> io::Result<()> {
+        self.root = Some(
+            process(pid)?
+                .ok_or_else(|| io::Error::other("native root disappeared before observation"))?
+                .identity,
+        );
         self.add(pid, /*parent*/ None)
     }
 
@@ -238,6 +247,32 @@ impl Tracker {
         let mut error = self.observe().err();
         for parent in self.active.values().copied().collect::<Vec<_>>() {
             if let Err(next) = self.children(parent) {
+                error.get_or_insert(next);
+            }
+        }
+        if let Some(root) = self.root {
+            // The supervisor keeps this direct child unreaped, pinning the
+            // original group number even after exit or a group change. Group
+            // retirement covers forks that orphaned before event discovery.
+            let group = (|| {
+                if !process(root.pid)?.is_some_and(|p| p.identity == root) {
+                    return Err(io::Error::other(
+                        "native root identity lost before retirement",
+                    ));
+                }
+                // Signal checked live members below. Darwin can return EPERM
+                // for killpg when the group's only remaining members are zombies.
+                for pid in list_pids(root.pid, libc::proc_listpgrppids)? {
+                    if let Some(info) = process(pid)?
+                        && info.group == root.pid
+                        && !info.zombie
+                    {
+                        self.active.insert(pid, info.identity);
+                    }
+                }
+                Ok(())
+            })();
+            if let Err(next) = group {
                 error.get_or_insert(next);
             }
         }

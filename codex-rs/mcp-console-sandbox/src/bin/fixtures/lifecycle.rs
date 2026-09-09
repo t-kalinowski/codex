@@ -7,6 +7,22 @@ use std::process::Command;
 use std::process::Stdio;
 
 pub fn run(operation: &str) -> Result<()> {
+    if operation == "group-tree" {
+        println!(
+            "{}",
+            serde_json::json!({"pid": std::process::id(), "temporary": std::env::var("TMPDIR")?})
+        );
+        std::io::stdout().flush()?;
+        std::io::stdin().read_exact(&mut [0])?;
+        // Retain all standard streams, including an unfinished framed output.
+        let child = Command::new("/bin/sleep").arg("600").spawn()?;
+        println!("{}", child.id());
+        print!("{{\"partial\":");
+        std::io::stdout().flush()?;
+        let mut status = [0];
+        std::io::stdin().read_exact(&mut status)?;
+        std::process::exit(i32::from(status[0]));
+    }
     if operation == "signals" {
         for signal in [
             libc::SIGHUP,

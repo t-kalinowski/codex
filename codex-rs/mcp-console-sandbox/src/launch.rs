@@ -12,7 +12,6 @@ use std::fs::File;
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
-use std::os::unix::process::ExitStatusExt;
 use std::process::Stdio;
 use std::time::Duration;
 use std::time::Instant;
@@ -111,10 +110,8 @@ pub async fn run(request: Bootstrap, stdin: File, signals: Signals) -> Result<i3
                 .observe()
                 .inspect_err(|_| observation_failed = true)?;
             // A completed root wins over pending signals and parent death.
-            if let Some(status) = root.try_wait()? {
-                return Ok(status
-                    .code()
-                    .unwrap_or_else(|| 128 + status.signal().unwrap_or(1)));
+            if let Some(status) = platform::root_status(root.id() as i32)? {
+                return Ok(status);
             }
             if !parent
                 .as_ref()
@@ -189,10 +186,7 @@ pub async fn run(request: Bootstrap, stdin: File, signals: Signals) -> Result<i3
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     if let Some(child) = &mut child {
-        // Linux's subreaper pass may already have reaped the direct child.
-        if let Err(error) = child.try_wait()
-            && error.raw_os_error() != Some(libc::ECHILD)
-        {
+        if let Err(error) = child.try_wait() {
             errors.push(format!("reap sandbox root: {error}"));
         }
     }

@@ -63,15 +63,18 @@ impl Parent {
     }
 }
 
-pub struct Tracker;
+pub struct Tracker {
+    root: Option<i32>,
+}
 impl Tracker {
     pub fn new() -> io::Result<Self> {
         if unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } < 0 {
             return Err(io::Error::last_os_error());
         }
-        Ok(Self)
+        Ok(Self { root: None })
     }
-    pub fn track_root(&mut self, _: i32) -> io::Result<()> {
+    pub fn track_root(&mut self, pid: i32) -> io::Result<()> {
+        self.root = Some(pid);
         Ok(())
     }
     pub fn observe(&mut self) -> io::Result<()> {
@@ -92,14 +95,21 @@ impl Tracker {
         }
         children.sort_unstable();
         children.dedup();
-        if children.is_empty() {
-            return Ok(true);
-        }
+        let mut live = false;
         let mut failure = None;
         for pid in children {
+            // Keep the direct root waitable until all adopted descendants have
+            // stopped. The shared supervisor owns its final reap and status.
+            if Some(pid) == self.root && super::root_status(pid)?.is_some() {
+                continue;
+            }
+            live = true;
             let result = (|| {
                 let fd = pidfd(pid)?;
                 signal(&fd, libc::SIGKILL)?;
+                if Some(pid) == self.root {
+                    return Ok(());
+                }
                 let mut status = 0;
                 if unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) } < 0 {
                     return Err(io::Error::last_os_error());
@@ -110,7 +120,7 @@ impl Tracker {
                 failure.get_or_insert(error);
             }
         }
-        failure.map_or(Ok(false), Err)
+        failure.map_or(Ok(!live), Err)
     }
 }
 

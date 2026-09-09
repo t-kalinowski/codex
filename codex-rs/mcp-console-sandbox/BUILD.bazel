@@ -39,6 +39,7 @@ rust_test(
         "tests/bootstrap_contract.rs",
         "tests/lifecycle/config_tests.rs",
         "tests/lifecycle/lifecycle_tests.rs",
+        "tests/lifecycle/retirement_tests.rs",
         "tests/lifecycle/security_tests.rs",
         "tests/lifecycle/startup_tests.rs",
         "tests/lifecycle/terminal_tests.rs",
