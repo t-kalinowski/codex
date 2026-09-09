@@ -1,5 +1,15 @@
 # Bootstrap protocol version 2
 
+Two explicit input modes are supported. Both accept one immutable configuration and use the same supervisor.
+
+## Environment configuration
+
+Invoke `mcp-console-sandbox --config-env NAME -- command [args...]`. `NAME` must select UTF-8 JSON already present in the child environment. The JSON has the request fields below, excluding `command`, `cwd`, and `environment`; those three fields are rejected in this mode. The target uses the ordinary arguments, current working directory, and environment, with the selected variable removed and the documented private-directory and native proxy overrides applied. The selected variable cannot also name a private-directory export.
+
+Configuration is copied once before runtime or native setup. There is no file, path reference, automatic file fallback, or reload. Changing the caller's environment after process creation cannot change the child's request. The maximum JSON size is 1 MiB, subject to the operating system's smaller exec argument/environment limits. As with any executable, the caller must trust the environment used to load the supervisor itself, including dynamic-loader settings. Use descriptor mode when the target environment must be distinct from that initial environment or the request exceeds exec limits.
+
+## Framed descriptor configuration
+
 Invoke `mcp-console-sandbox --bootstrap-fd <N>`. Supply exactly that option and one decimal descriptor number greater than 2. The descriptor must already be open and readable in the child; its number need not be 3.
 
 ```text
@@ -13,7 +23,9 @@ This is a breaking private protocol change. Only version 2 is accepted. The no-a
 
 The launcher normally creates an anonymous pipe, inherits its read end into the executable, closes its own read end, and retains the writer until it sends configuration. Start the executable before writing a potentially pipe-sized frame. There is no descriptor transfer after process creation.
 
-The JSON payload must contain 1 through 1,048,576 bytes. The native sandbox executable validates the descriptor before opening internal files or creating its runtime, adopts it once, and uses `File::read_exact` for the header and payload. It reads exactly the declared frame. A complete valid request releases startup without waiting for EOF; withholding the frame keeps the target and managed proxy from starting. Closing the writer before completing the frame cancels startup.
+The JSON payload must contain 1 through 1,048,576 bytes. The executable validates the descriptor before opening internal files or creating its runtime, adopts it once, and reads exactly the declared frame while observing cancellation signals. A complete valid request releases startup without waiting for EOF; withholding the frame keeps the target and managed proxy from starting. Closing the writer before completing the frame cancels startup.
+
+In this mode configuration becomes fixed at request acceptance, not process creation. The caller may prepare the request after spawning the supervisor. The accepted request is owned memory; the descriptor closes before setup, and further writes or changes to its backing resource cannot alter policy.
 
 The bootstrap descriptor is closed after parsing and validation, before runtime, proxy, or native setup. It is not a persistent control channel. Empty or truncated frames, invalid lengths, malformed requests, unsupported versions, and invalid invocation arguments return a nonzero status and an error on stderr without launching the target. Remaining request fields retain their native validation.
 
@@ -54,10 +66,11 @@ There are no later control messages or acknowledgments. No protocol output is wr
 | `network`                          | Upstream `NetworkSandboxPolicy`: `"restricted"` or `"enabled"`.                                                                                                                           |
 | `proxy`                            | Optional upstream `RemoteNetworkProxyConfig`. Omit or use `null` for no proxy. A supplied configuration must have `enabled: true`.                                                        |
 | `macos_seatbelt_profile_extension` | Optional trusted SBPL string appended to the native macOS Seatbelt profile. Omit or use `null` to leave the native profile unchanged. A supplied string is rejected on Linux.             |
+| `lifecycle`                        | Optional object described in [LIFECYCLE.md](LIFECYCLE.md): parent observation, signal behavior, private storage, and cleanup deadline.                                                    |
 
 The wrapper rejects unknown top-level fields. Nested upstream types retain the release's own serialization and validation rules. Version 2 requires UTF-8 command arguments, paths, and environment values; OS strings with other byte encodings are outside this protocol. Native argument and environment size and NUL restrictions still apply.
 
-`macos_seatbelt_profile_extension` is trusted caller configuration. The native sandbox executable appends a newline and the string to the profile prepared by the native Seatbelt backend, then launches the same `/usr/bin/sandbox-exec -p` command. It verifies that backend and command shape before appending. It does not initialize a second sandbox. Invalid SBPL fails through the native launcher before the target starts.
+`macos_seatbelt_profile_extension` is trusted caller configuration. The native stage applies the upstream profile, parameters, and appended SBPL together using `sandbox_init_with_parameters`, then restores signals and execs the target. Invalid SBPL fails before the target starts.
 
 The extension can grant permissions as well as restrict them. The native sandbox executable does not parse it or validate it as deny-only; the caller owns its interaction with the native filesystem, network, and platform rules. Do not populate this field from untrusted target input. The native sandbox executable contains no application-specific rules.
 
@@ -95,12 +108,12 @@ From this package directory:
 printf 'target input\n' | python3 examples/bootstrap.py /absolute/path/to/mcp-console-sandbox
 ```
 
-The example leaves target stdin directly attached and sends configuration independently. An application can delay the write until its manager is ready. Cancellation, descendant retirement, application temporary directories, terminal ownership, and signal delivery remain the caller's responsibilities.
+The example leaves target stdin directly attached and sends configuration independently. An application can delay the write until its request is ready. Lifecycle capabilities are selected in the same request.
 
 The outer invocation still marks unrelated inherited descriptors above stderr close-on-exec before starting the runtime. The bootstrap descriptor is explicitly closed before native setup. Native helper re-execs retain their own temporary setup descriptors until the upstream code releases them.
 
 ## Downstream handoff
 
-MCP Console should update its immutable source pin and protocol pin to version 2, inherit the bootstrap pipe read descriptor, pass `--bootstrap-fd <N>`, and leave the target's original stdin attached from process creation. Remove the SCM_RIGHTS stdin handoff and send the framed configuration when the manager is ready.
+A thin frontend can exec the environment-mode invocation with its ordinary command arguments, cwd, and target environment. It should explicitly select its private-directory exports, parent PID if retirement on caller death is wanted, SIGTERM behavior, filesystem/network rules, and any trusted macOS extension.
 
-Keep any still-needed wrapper code that restores the target's original signal mask while the waiting native executable retains blocked signals. This transport change does not change signal masks or dispositions and does not account for that wrapper responsibility. MCP Console continues to own signal delivery and supervision. Native Linux helpers can also retain standard streams or manage descendants; their existing behavior is unchanged.
+The runner owns launch, descendant retirement, native signal restoration, optional private storage, and proxy lifetime. An application-level fork-and-continue manager and sandbox-target signal wrapper are unnecessary. Large requests may retain the private descriptor mode. No MCP Console integration is included in this patch; its source, tests, and snapshots remain unchanged.
