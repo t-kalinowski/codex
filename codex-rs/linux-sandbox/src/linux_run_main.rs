@@ -191,10 +191,10 @@ pub(crate) fn run_main_with_target_setup(
             fd > libc::STDERR_FILENO && setup.is_some(),
             "target setup requires a native hook and a private descriptor"
         );
-        assert!(
-            !use_legacy_landlock && !no_proc,
-            "target setup requires PID isolation and namespace-local procfs"
-        );
+        if use_legacy_landlock || no_proc {
+            eprintln!("native target setup requires PID isolation and namespace-local procfs");
+            std::process::exit(1);
+        }
     }
 
     if command.is_empty() {
@@ -291,15 +291,20 @@ pub(crate) fn run_main_with_target_setup(
         }
         if let Some(fd) = target_setup_fd {
             // A host procfs would expose unsandboxed processes and descriptors.
-            assert_eq!(
-                fs::read_link("/proc/self")
-                    .unwrap_or_else(|error| panic!("inspect sandbox procfs: {error}")),
-                PathBuf::from(std::process::id().to_string()),
-                "target setup requires namespace-local procfs"
-            );
+            let procfs = fs::read_link("/proc/self").unwrap_or_else(|error| {
+                eprintln!("native target setup: inspect sandbox procfs: {error}");
+                std::process::exit(1);
+            });
+            if procfs != std::process::id().to_string() {
+                eprintln!("native target setup requires namespace-local procfs");
+                std::process::exit(1);
+            }
             let descriptor = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
             setup.unwrap_or_else(|| panic!("missing native hook"))(&mut target, descriptor)
-                .unwrap_or_else(|error| panic!("native target setup: {error}"));
+                .unwrap_or_else(|error| {
+                    eprintln!("native target setup: {error}");
+                    std::process::exit(1);
+                });
         }
         // The namespace-init loop below reaps this child with waitpid(-1).
         #[expect(clippy::zombie_processes)]

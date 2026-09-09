@@ -40,6 +40,7 @@ rust_test(
         "tests/lifecycle/cancellation_tests.rs",
         "tests/lifecycle/config_tests.rs",
         "tests/lifecycle/lifecycle_tests.rs",
+        "tests/lifecycle/prerequisite_tests.rs",
         "tests/lifecycle/retirement_tests.rs",
         "tests/lifecycle/security_tests.rs",
         "tests/lifecycle/startup_tests.rs",
@@ -49,6 +50,7 @@ rust_test(
     crate_root = "tests/bootstrap_contract.rs",
     data = [
         "tests/lifecycle/interposer.c",
+        "tests/lifecycle/procfs_interposer.c",
         ":mcp-console-sandbox",
         ":mcp-console-sandbox-fixture",
     ] + select({

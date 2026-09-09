@@ -9,6 +9,9 @@ mod codex;
 mod configuration;
 #[path = "lifecycle/lifecycle_tests.rs"]
 mod lifecycle;
+#[cfg(target_os = "linux")]
+#[path = "lifecycle/prerequisite_tests.rs"]
+mod prerequisite;
 #[path = "lifecycle/retirement_tests.rs"]
 mod retirement;
 #[path = "lifecycle/security_tests.rs"]
