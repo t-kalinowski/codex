@@ -37,6 +37,7 @@ rust_test(
     srcs = [
         "src/codex.rs",
         "tests/bootstrap_contract.rs",
+        "tests/lifecycle/cancellation_tests.rs",
         "tests/lifecycle/config_tests.rs",
         "tests/lifecycle/lifecycle_tests.rs",
         "tests/lifecycle/retirement_tests.rs",

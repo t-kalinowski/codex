@@ -34,6 +34,9 @@ pub async fn run(request: Bootstrap, stdin: File, signals: Signals) -> Result<i3
         .transpose()?;
     let mut prepared = None;
     let mut child = None;
+    // Keep the setup channel alive through retirement. Closing a partial frame
+    // first wakes the native reader with a spurious startup error.
+    let mut gate = None;
     let mut observation_failed = false;
     let startup_cancellation = || -> Result<Option<i32>> {
         if !parent
@@ -76,7 +79,7 @@ pub async fn run(request: Bootstrap, stdin: File, signals: Signals) -> Result<i3
         };
         prepared = Some(native);
         let native = prepared.as_mut().context("prepared native launch")?;
-        let mut gate = Some(Gate::new(channel, &native.setup)?);
+        gate = Some(Gate::new(channel, &native.setup)?);
         if let Some(status) = startup_cancellation()? {
             return Ok(status);
         }
@@ -190,6 +193,7 @@ pub async fn run(request: Bootstrap, stdin: File, signals: Signals) -> Result<i3
             errors.push(format!("reap sandbox root: {error}"));
         }
     }
+    drop(gate);
     if let Err(error) = terminal.restore() {
         errors.push(format!("restore foreground terminal: {error}"));
     }

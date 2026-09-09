@@ -1,6 +1,8 @@
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 #![allow(clippy::unwrap_used)]
 
+#[path = "lifecycle/cancellation_tests.rs"]
+mod cancellation;
 #[path = "../src/codex.rs"]
 mod codex;
 #[path = "lifecycle/config_tests.rs"]

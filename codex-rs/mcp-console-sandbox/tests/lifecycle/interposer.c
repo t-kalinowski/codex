@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -7,6 +8,8 @@
 #include <string.h>
 #include <unistd.h>
 #include <poll.h>
+#include <sys/socket.h>
+#include <sys/wait.h>
 #ifdef __APPLE__
 #include <libproc.h>
 #include <sys/event.h>
@@ -35,12 +38,62 @@ static void checkpoint(pid_t pid) {
     if (release && read(atoi(release), &byte, 1) != 1) _exit(125);
 }
 
+static pid_t native_pid;
+static pid_t native_root;
+static int native_fd = -1;
+
 static pid_t observed_fork(void) {
     pid_t (*real)(void) = NEXT(fork);
     pid_t pid = real();
+    if (pid > 0) native_root = native_pid = pid;
     if (pid > 0 && getenv("SANDBOX_TEST_GATE_SPAWN")) checkpoint(pid);
     return pid;
 }
+
+static void ready(int fd, pid_t pid) {
+    native_fd = fd;
+    native_pid = pid;
+    const char *stage = getenv("SANDBOX_TEST_SETUP_STAGE");
+    if (stage && strcmp(stage, "ready") == 0) checkpoint(pid);
+    if (stage && strcmp(stage, "blocked") == 0 && kill(pid, SIGSTOP) < 0) _exit(125);
+}
+
+static ssize_t observed_send(int fd, const void *buffer, size_t size, int flags) {
+    ssize_t (*real)(int, const void *, size_t, int) = NEXT(send);
+    const char *stage = getenv("SANDBOX_TEST_SETUP_STAGE");
+    static int observed;
+    int gate = !observed && fd == native_fd && stage && strcmp(stage, "ready") != 0;
+    ssize_t count = real(fd, buffer, gate && size > 8 ? 8 : size, flags);
+    if (gate && count > 0) { observed = 1; checkpoint(native_pid); }
+    // If cancellation at readiness was ignored, let the released target exit
+    // before the next supervisor iteration can hide that mistake by killing it.
+    if (fd == native_fd && stage && strcmp(stage, "ready") == 0 && count == (ssize_t)size) {
+        siginfo_t info = {0};
+        if (waitid(P_PID, native_root, &info, WEXITED | WNOWAIT) < 0) _exit(125);
+    }
+    return count;
+}
+
+#ifdef __APPLE__
+static ssize_t observed_recv(int fd, void *buffer, size_t size, int flags) {
+    ssize_t (*real)(int, void *, size_t, int) = NEXT(recv);
+    ssize_t count = real(fd, buffer, size, flags);
+    if (count == 1 && size == 1 && ((unsigned char *)buffer)[0] == 1) ready(fd, native_pid);
+    return count;
+}
+#else
+ssize_t recvmsg(int fd, struct msghdr *message, int flags) {
+    ssize_t (*real)(int, struct msghdr *, int) = NEXT(recvmsg);
+    ssize_t count = real(fd, message, flags);
+    if (count == 1) {
+        for (struct cmsghdr *c = CMSG_FIRSTHDR(message); c; c = CMSG_NXTHDR(message, c)) {
+            if (c->cmsg_level == SOL_SOCKET && c->cmsg_type == SCM_CREDENTIALS)
+                ready(fd, ((struct ucred *)CMSG_DATA(c))->pid);
+        }
+    }
+    return count;
+}
+#endif
 
 static int observed_poll(struct pollfd *fds, nfds_t count, int timeout) {
     int (*real)(struct pollfd *, nfds_t, int) = NEXT(poll);
@@ -86,6 +139,8 @@ static int observed_children(pid_t pid, void *buffer, int size) {
     pair_##original __attribute__((section("__DATA,__interpose"))) = \
     {(const void *)(uintptr_t)&replacement, (const void *)(uintptr_t)&original};
 INTERPOSE(observed_fork, fork)
+INTERPOSE(observed_recv, recv)
+INTERPOSE(observed_send, send)
 INTERPOSE(observed_poll, poll)
 INTERPOSE(observed_kevent, kevent)
 INTERPOSE(observed_kill, kill)
@@ -93,6 +148,7 @@ INTERPOSE(observed_unlinkat, unlinkat)
 INTERPOSE(observed_children, proc_listchildpids)
 #else
 pid_t fork(void) { return observed_fork(); }
+ssize_t send(int fd, const void *buffer, size_t size, int flags) { return observed_send(fd, buffer, size, flags); }
 int poll(struct pollfd *fds, nfds_t count, int timeout) { return observed_poll(fds, count, timeout); }
 int kill(pid_t pid, int number) { return observed_kill(pid, number); }
 int unlinkat(int fd, const char *path, int flags) { return observed_unlinkat(fd, path, flags); }

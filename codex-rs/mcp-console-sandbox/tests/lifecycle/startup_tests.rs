@@ -1,7 +1,7 @@
 use super::*;
 use pretty_assertions::assert_eq;
 
-fn interposer(directory: &Path) -> std::path::PathBuf {
+pub(super) fn interposer(directory: &Path) -> std::path::PathBuf {
     let library = directory.join("interposer.dylib");
     let source = codex_utils_cargo_bin::find_resource!("tests/lifecycle/interposer.c").unwrap();
     let mut command = Command::new("cc");
@@ -19,14 +19,14 @@ fn interposer(directory: &Path) -> std::path::PathBuf {
     library
 }
 
-fn preload(command: &mut Command, library: &Path) {
+pub(super) fn preload(command: &mut Command, library: &Path) {
     #[cfg(target_os = "macos")]
     command.env("DYLD_INSERT_LIBRARIES", library);
     #[cfg(target_os = "linux")]
     command.env("LD_PRELOAD", library);
 }
 
-fn inherit(command: &mut Command, descriptors: &[i32]) {
+pub(super) fn inherit(command: &mut Command, descriptors: &[i32]) {
     let descriptors = descriptors.to_vec();
     unsafe {
         command.pre_exec(move || {

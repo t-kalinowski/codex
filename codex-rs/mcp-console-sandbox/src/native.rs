@@ -162,9 +162,9 @@ impl Gate {
     pub fn advance(&mut self, root: i32) -> Result<bool> {
         if self.target.is_none() {
             self.target = crate::platform::receive_ready(&mut self.stream, root)?;
-            if self.target.is_none() {
-                return Ok(false);
-            }
+            // Readiness may race cancellation or caller death. Return to the
+            // supervisor's cancellation check before sending any release data.
+            return Ok(false);
         }
         match self.stream.write(&self.payload[self.written..]) {
             Ok(0) => anyhow::bail!("native gate closed before request acceptance"),
