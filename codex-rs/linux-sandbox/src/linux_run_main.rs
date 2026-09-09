@@ -138,6 +138,10 @@ pub struct LandlockCommand {
     #[arg(long = "stdin-fd", hide = true)]
     pub stdin_fd: Option<libc::c_int>,
 
+    /// Native execution gate used only by run_main_with_target_setup callers.
+    #[arg(long = "target-setup-fd", hide = true)]
+    pub target_setup_fd: Option<libc::c_int>,
+
     /// Inherited fallback mounts that must be authenticated before sandboxed code runs.
     #[arg(long = "verify-fd-mount", hide = true)]
     pub verify_fd_mounts: Vec<String>,
@@ -161,6 +165,12 @@ pub struct LandlockCommand {
 /// 2. Apply in-process restrictions (no_new_privs + seccomp).
 /// 3. `execvp` into the final command.
 pub fn run_main() -> ! {
+    run_main_with_target_setup(None)
+}
+
+pub(crate) fn run_main_with_target_setup(
+    setup: Option<fn(&mut std::process::Command, std::os::fd::OwnedFd) -> std::io::Result<()>>,
+) -> ! {
     let LandlockCommand {
         sandbox_policy_cwd,
         command_cwd,
@@ -171,9 +181,21 @@ pub fn run_main() -> ! {
         proxy_route_spec,
         verify_fd_mounts,
         stdin_fd,
+        target_setup_fd,
         no_proc,
         command,
     } = LandlockCommand::parse();
+
+    if let Some(fd) = target_setup_fd {
+        assert!(
+            fd > libc::STDERR_FILENO && setup.is_some(),
+            "target setup requires a native hook and a private descriptor"
+        );
+        assert!(
+            !use_legacy_landlock && !no_proc,
+            "target setup requires PID isolation and namespace-local procfs"
+        );
+    }
 
     if command.is_empty() {
         panic!("No command specified to execute.");
@@ -256,18 +278,36 @@ pub fn run_main() -> ! {
             panic!("error applying Linux sandbox restrictions: {e:?}");
         }
 
+        use std::os::unix::process::CommandExt;
         let signal_mask = ForwardedSignalMask::block();
-        let command_pid = unsafe { libc::fork() };
-        if command_pid < 0 {
-            let err = std::io::Error::last_os_error();
-            panic!("failed to fork sandboxed command: {err}");
+        let mut target = std::process::Command::new(&command[0]);
+        target.args(&command[1..]);
+        unsafe {
+            target.pre_exec(move || {
+                reset_forwarded_signal_handlers_to_default();
+                signal_mask.restore();
+                Ok(())
+            });
         }
-
-        if command_pid == 0 {
-            reset_forwarded_signal_handlers_to_default();
-            signal_mask.restore();
-            exec_or_panic(command);
+        if let Some(fd) = target_setup_fd {
+            // A host procfs would expose unsandboxed processes and descriptors.
+            assert_eq!(
+                fs::read_link("/proc/self")
+                    .unwrap_or_else(|error| panic!("inspect sandbox procfs: {error}")),
+                PathBuf::from(std::process::id().to_string()),
+                "target setup requires namespace-local procfs"
+            );
+            let descriptor = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+            setup.unwrap_or_else(|| panic!("missing native hook"))(&mut target, descriptor)
+                .unwrap_or_else(|error| panic!("native target setup: {error}"));
         }
+        // The namespace-init loop below reaps this child with waitpid(-1).
+        #[expect(clippy::zombie_processes)]
+        let child = target
+            .spawn()
+            .unwrap_or_else(|error| panic!("spawn sandboxed command: {error}"));
+        let command_pid = child.id() as libc::pid_t;
+        drop(target);
 
         // Only the command owns its input after fork. Retaining a reader here
         // would hide command-side stdin closure from the caller's writer.
@@ -294,7 +334,10 @@ pub fn run_main() -> ! {
         }
     }
 
-    if file_system_sandbox_policy.has_full_disk_write_access() && !allow_network_for_proxy {
+    if file_system_sandbox_policy.has_full_disk_write_access()
+        && !allow_network_for_proxy
+        && target_setup_fd.is_none()
+    {
         if let Err(e) = apply_permission_profile_to_current_thread(
             &permission_profile,
             &sandbox_policy_cwd,
@@ -322,7 +365,7 @@ pub fn run_main() -> ! {
         } else {
             None
         };
-        let inner = build_inner_seccomp_command(InnerSeccompCommandArgs {
+        let mut inner = build_inner_seccomp_command(InnerSeccompCommandArgs {
             sandbox_policy_cwd: &sandbox_policy_cwd,
             command_cwd: command_cwd.as_deref(),
             permission_profile: &permission_profile,
@@ -330,6 +373,9 @@ pub fn run_main() -> ! {
             proxy_route_spec,
             command,
         });
+        if let Some(fd) = target_setup_fd {
+            inner.splice(1..1, ["--target-setup-fd".to_string(), fd.to_string()]);
+        }
         run_bwrap_with_proc_fallback(
             &sandbox_policy_cwd,
             command_cwd.as_deref(),
@@ -828,6 +874,7 @@ fn release_child_exec_start(write_fd: libc::c_int) {
     }
 }
 
+#[derive(Clone, Copy)]
 struct ForwardedSignalMask {
     previous: libc::sigset_t,
 }

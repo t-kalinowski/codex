@@ -33,6 +33,17 @@ pub fn run_main() -> ! {
     linux_run_main::run_main();
 }
 
+/// Run the native stages with a one-shot target setup hook. The hidden
+/// `--target-setup-fd` option is carried through namespace creation. The hook
+/// owns that descriptor and runs after enforcement, before spawning the target.
+/// It must close the descriptor and establish any target pre-exec state.
+#[cfg(target_os = "linux")]
+pub fn run_main_with_target_setup(
+    setup: fn(&mut std::process::Command, std::os::fd::OwnedFd) -> std::io::Result<()>,
+) -> ! {
+    linux_run_main::run_main_with_target_setup(Some(setup));
+}
+
 #[cfg(not(target_os = "linux"))]
 pub fn run_main() -> ! {
     panic!("codex-linux-sandbox is only supported on Linux");

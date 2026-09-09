@@ -841,12 +841,44 @@ pub fn create_seatbelt_command_args(
         .map_err(|err| err.to_string())
 }
 
+/// A native Seatbelt profile, separated from the sandbox-exec CLI encoding.
+/// Callers applying it in a native execution stage must retain all parameters.
+pub struct SeatbeltProfile {
+    pub policy: String,
+    pub parameters: Vec<(String, PathBuf)>,
+}
+
+/// Prepare the ordinary process profile for an in-process native launcher.
+pub fn create_seatbelt_profile(
+    args: CreateSeatbeltCommandArgsParams<'_>,
+) -> Result<SeatbeltProfile, String> {
+    build_seatbelt_profile(args, MacosSeatbeltProfile::Process).map_err(|err| err.to_string())
+}
+
 pub(crate) fn create_seatbelt_command_args_with_profile(
     args: CreateSeatbeltCommandArgsParams<'_>,
     profile: MacosSeatbeltProfile,
 ) -> Result<Vec<String>, SeatbeltPreparationError> {
+    let command = args.command.clone();
+    let profile = build_seatbelt_profile(args, profile)?;
+    let mut seatbelt_args = vec!["-p".to_string(), profile.policy];
+    seatbelt_args.extend(
+        profile
+            .parameters
+            .into_iter()
+            .map(|(key, value)| format!("-D{key}={value}", value = value.to_string_lossy())),
+    );
+    seatbelt_args.push("--".to_string());
+    seatbelt_args.extend(command);
+    Ok(seatbelt_args)
+}
+
+fn build_seatbelt_profile(
+    args: CreateSeatbeltCommandArgsParams<'_>,
+    profile: MacosSeatbeltProfile,
+) -> Result<SeatbeltProfile, SeatbeltPreparationError> {
     let CreateSeatbeltCommandArgsParams {
-        command,
+        command: _,
         file_system_sandbox_policy,
         network_sandbox_policy,
         sandbox_policy_cwd,
@@ -1019,16 +1051,10 @@ pub(crate) fn create_seatbelt_command_args_with_profile(
     ]
     .concat();
 
-    let mut seatbelt_args: Vec<String> = vec!["-p".to_string(), full_policy];
-    let definition_args = dir_params
-        .into_iter()
-        .map(|(key, value): (String, PathBuf)| {
-            format!("-D{key}={value}", value = value.to_string_lossy())
-        });
-    seatbelt_args.extend(definition_args);
-    seatbelt_args.push("--".to_string());
-    seatbelt_args.extend(command);
-    Ok(seatbelt_args)
+    Ok(SeatbeltProfile {
+        policy: full_policy,
+        parameters: dir_params,
+    })
 }
 
 #[cfg(test)]
