@@ -52,6 +52,12 @@ fn accept(descriptor: OwnedFd) -> Result<TargetSetup> {
 
 #[cfg(target_os = "linux")]
 pub fn linux_target_setup(command: &mut Command, descriptor: OwnedFd) -> std::io::Result<()> {
+    // Re-arm after bubblewrap's credential/exec boundary, before announcing
+    // readiness. The existing gate rejects an orphaned startup; namespace-init
+    // death also kills detached workload descendants.
+    if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
     let setup = accept(descriptor).map_err(std::io::Error::other)?;
     // Preserve namespace-local proxy endpoints. Loader and private-directory
     // variables take effect only here, after enforcement and helper setup.

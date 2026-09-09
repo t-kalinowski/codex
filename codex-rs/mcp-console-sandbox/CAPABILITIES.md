@@ -16,6 +16,8 @@ every other Codex execution path lacks those behaviors.
 | Standalone launch interface                        | An executable usable without Codex configuration, sessions, or Rust APIs. `--config-env NAME -- command [args...]` reads explicitly selected JSON once while keeping arguments, cwd, and target environment as ordinary launch inputs. `--bootstrap-fd N` accepts a larger framed request independently of stdin.                                             |
 | One supervisor for the whole lifetime              | One application process owns native launch, descendant retirement, optional private storage, and the existing proxy. Normal exit, nonzero exit, interruption, and configured retirement share cleanup sequencing. Descendants are retired before storage removal and completion is reported; Darwin's observation limits apply.                               |
 | Optional caller-death and SIGTERM retirement       | `lifecycle.parent_pid` observes the captured direct parent. `lifecycle.sigterm: "retire"` makes SIGTERM request cleanup, even if inherited ignored or blocked. Both are explicit caller choices; ordinary SIGTERM forwarding is the default.                                                                                                                  |
+| Owned stdio group isolation                        | With a validated parent and nonterminal stdin/stdout, the runner has its own group before creating resources. Terminal stderr does not disable isolation. Caller-only or caller-group SIGKILL leaves ordinary retirement to the runner.                                                                                                                       |
+| Linux workload termination after runner loss       | The trusted child and namespace init arm parent-death links. After native readiness, runner SIGKILL terminates the tested system/bundled workloads, including detached descendants and proxy bridges. Earlier bubblewrap setup windows remain outside this guarantee.                                                                                         |
 | Cancellation during startup                        | A private execution gate lets the supervisor establish descendant observation before releasing the target. Native enforcement precedes target loader code. Cancellation also covers partial framed requests and native startup, with cleanup of resources already created.                                                                                    |
 | Optional private temporary storage                 | `lifecycle.private_tmp` creates a private container and disposable writable data directory, grants the required sandbox access, and exports its path through caller-selected environment names. Cleanup handles replaced data directories, mode-zero directories, and symlinks without following them outside the container.                                  |
 | Cleanup failure reporting                          | Discovery, termination, deadline, terminal restoration, proxy shutdown, and directory deletion failures produce a nonzero result and diagnostic. A later empty process scan cannot erase an earlier discovery or termination failure. Storage is retained if descendant retirement cannot be established.                                                     |
@@ -85,10 +87,12 @@ sideband without relaxing that policy.
 Private storage adds a writable location; it does not remove other
 caller-granted write access. No MCP Console policy defaults are
 embedded. There is no watchdog or custom recovery after the sole
-supervisor crashes or receives SIGKILL. Surviving workloads retain
-native restrictions, but cleanup and terminal restoration are then not
-guaranteed. Windows, job suspension/resumption, and application restart
-are outside scope.
+supervisor crashes or receives SIGKILL. Linux workload termination after
+native readiness follows the
+[documented parent-death chain](LIFECYCLE.md#owned-stdio-process-groups-and-linux-parent-death).
+On macOS, surviving workloads retain native restrictions. Private-directory
+deletion and terminal restoration are not guaranteed after runner death.
+Windows, job suspension/resumption, and application restart are outside scope.
 
 See [INTEGRATION.md](INTEGRATION.md) for the self-contained modules,
 upstream edits, security-sensitive dependencies, and reapplication

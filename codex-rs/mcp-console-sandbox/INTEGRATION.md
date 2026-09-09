@@ -29,6 +29,19 @@ The gated native endpoint uses `File` read/write on its owned socket descriptor.
 
 Darwin's libproc/kqueue observation boundary, `sandbox_init_with_parameters`, and Linux's subreaper/pidfd/procfs APIs are platform dependencies. Fault-injection fixtures interpose actual host syscalls to establish causal startup/watch checkpoints and verify failure reporting. They add no production test hooks. Acceptance tests also check that target-side loader constructors run only after enforcement. Do not replace those checks with sleeps or implementation snapshots during rebasing.
 
+## Additional parent-death rebase review
+
+The owned-stdio changes are entirely inside this package. They add no upstream API, public lifecycle option, dependency, helper process, or mutable configuration. Review these assumptions along with the four existing integration files:
+
+- `launch.rs` captures the original terminal group before `setpgid`, selects isolation from a validated parent and nonterminal stdin/stdout, and leaves the native process group/session arrangement intact. Directed signal forwarding remains separate from signals sent to the caller's group.
+- The current-thread runtime in `main.rs` keeps the native child's creating thread alive until retirement. Moving spawn into a short-lived worker thread would break Linux's parent-death contract. The pre-exec hook must continue to capture the expected parent before fork, arm SIGKILL, and check parenthood without allocation or locks.
+- Trusted native helpers need unblocked forwarding signals for the existing TERM death links in `linux-sandbox/src/proxy_lifecycle.rs` and synthetic-mount supervision in `linux_run_main.rs`. Original caller dispositions/masks belong at the final target hook.
+- `launcher.rs` selects system or bundled bubblewrap, uses `--as-pid-1`, and preserves `--die-with-parent`. Check every native fork, exec, credential change, and creating thread. The leaf `native.rs` hook re-arms SIGKILL in namespace init after exec and before readiness; init persists while the target and detached descendants execute. A final target exec must not replace that init.
+
+The [Linux man page](https://man7.org/linux/man-pages/man2/PR_SET_PDEATHSIG.2const.html) documents fork, credential, exec, and creating-thread limits. The reviewed bundled implementation arms the host monitor after dropping privileges and the namespace command before exec (`vendor/bubblewrap/bubblewrap.c`). Neither inherited settings nor `--die-with-parent` prove coverage of every earlier setup window. The precise remaining startup gap and the absence of storage cleanup after runner death are documented in [LIFECYCLE.md](LIFECYCLE.md#owned-stdio-process-groups-and-linux-parent-death). Setuid/file-capability system helpers were not exercised in this continuation.
+
+Downstream callers need to repin and rebuild the tested executable. Protocol 2, configuration, policy, and the ordinary caller relationship are unchanged. A caller that previously relied on broadcasting INT/HUP/QUIT/TERM to its own group must instead address the runner when it wants forwarding. MCP Console changes are outside this patch.
+
 ## Reapplication
 
 1. Start from the new release and reapply the focused extraction history. Keep the native hook edits separate from leaf lifecycle/tests/docs so conflicts remain reviewable. Update workspace registration/locks only as needed by the new release.
@@ -51,3 +64,23 @@ The executable regression first failed because all six socket operations succeed
 The complete debug and release executable suites passed 52 tests each on Linux and 54 each on macOS, with retries disabled. All 207 Linux native tests and the macOS Bazel executable suite passed. The macOS debug run reported five Nextest output-descriptor `LEAK` annotations despite passing assertions; the release run had none. Their cause was not isolated by this change. Linux Cargo tests used the same test-local AppArmor launcher described above. The Linux Bazel runtime gate was not repeated; its documented host restriction remains a validation limitation.
 
 Scoped `just fix` passed on both platforms; the macOS argument-comment lint and `just fmt` on both platforms passed. Native `landlock.rs` is byte-for-byte identical to release commit `90854393966b21e9ebfd21b122334eb09a20c93d`. No dependency or lockfile changes were needed. [MCP_CONSOLE_HANDOFF.md](MCP_CONSOLE_HANDOFF.md) specifies the downstream transport and lifecycle integration work.
+
+## Validation of owned stdio isolation and Linux parent death
+
+This change starts at `4569dae82`, without resetting the branch. Before implementation, the new group-kill contract left native processes alive on both platforms. Linux runner SIGKILL also left native processes alive. Adding only the direct-child death signal still left namespace init alive, and proxy-enabled startup exposed bridges with blocked TERM. Unblocking the trusted helper's supervisor mask and re-arming namespace init made those contracts pass. A separate syscall interposer measured `PDEATHSIG=0` immediately before the native hook on the AppArmor host; the hook now arms SIGKILL there. No vendored or upstream integration source changed.
+
+Validation used macOS arm64 and Ubuntu 24.04 x86_64 on `mule` (kernel 6.8.0-139), with Rust 1.95.0 and retries disabled:
+
+| Check                                               | Result                                                                                                                               |
+| --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| macOS debug / release executable contracts          | 61 / 61 passed                                                                                                                       |
+| Linux debug / release executable contracts          | 62 / 62 passed                                                                                                                       |
+| Linux namespace-enabled container, ordinary helpers | All 62 debug executable contracts passed; system bubblewrap 0.9.0 and the unmodified bundled helper, with proxy enabled and disabled |
+| Native suites                                       | Linux: all 207 passed. macOS: 92 passed with the two established stderr-matcher exclusions in REBASE                                 |
+| macOS Bazel executable contract                     | Passed                                                                                                                               |
+
+Linux host executable contracts use the existing task-local AppArmor launcher for the bundled executable, as described above; the system selection uses installed bubblewrap. The container runs with namespace prerequisites enabled and uses the ordinary bundled executable directly. Less permissive container attempts failed native namespace/procfs prerequisites before workload readiness; the successful container run did not weaken those checks. An initial Linux native-suite invocation put the unprofiled built helper on PATH and failed 12 cases at uid-map setup; restoring the ordinary host PATH passed all 207. No host policy or sysctl changed.
+
+Some passing macOS debug/native runs reported Nextest output-descriptor `LEAK` annotations, including `cwd_and_complete_environment_reach_the_target`; release contracts had none. Their cause remains unisolated. Setuid/file-capability system helpers, Windows, Linux Bazel runtime, and hosted CI were not validated. The internal bubblewrap startup windows described in LIFECYCLE remain outside the verified termination guarantee.
+
+Scoped `just fix` and all-target Clippy with warnings denied passed on both platforms. The macOS argument-comment lint, `just fmt`, and `git diff --check` passed. Functional tests preceded the final lint/format pass. No dependency or lockfile update was needed.

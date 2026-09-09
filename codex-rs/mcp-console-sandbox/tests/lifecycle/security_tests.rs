@@ -52,8 +52,12 @@ fn supervisor_loss_cannot_remove_native_enforcement() {
     stdout.read_line(&mut line).unwrap();
     let ready: Value = serde_json::from_str(&line).unwrap();
     let mut stdin = child.stdin.take().unwrap();
+    #[cfg(target_os = "linux")]
+    let processes = ownership::watch_tree(child.id() as i32);
     child.kill().unwrap();
     child.wait().unwrap();
+    #[cfg(target_os = "linux")]
+    ownership::await_exit(&processes);
     let _ = stdin.write_all(b"continue");
     drop(stdin);
     line.clear();
@@ -61,7 +65,7 @@ fn supervisor_loss_cannot_remove_native_enforcement() {
     #[cfg(target_os = "macos")]
     assert_eq!(line, "still restricted\n");
     #[cfg(target_os = "linux")]
-    assert!(line.is_empty() || line == "still restricted\n", "{line}");
+    assert_eq!(line, "");
     assert!(!forbidden.exists());
     // SIGKILL deliberately has no custom cleanup owner. The test owns leftovers.
     assert!(Path::new(ready["temporary"].as_str().unwrap()).exists());

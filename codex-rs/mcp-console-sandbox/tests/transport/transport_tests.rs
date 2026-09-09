@@ -34,9 +34,9 @@ fn regular_file_stdin_preserves_offset_seekability_and_shared_description() {
     let staging = tempfile::tempdir().unwrap();
     let (child, mut bootstrap) =
         spawn(runner(staging.path()).stdin(Stdio::from(file.try_clone().unwrap())));
-    bootstrap
-        .write_all(&frame(&fixture("stdin-file", &[])))
-        .unwrap();
+    let mut request = fixture("stdin-file", &[]);
+    request["lifecycle"] = json!({"parent_pid": std::process::id()});
+    bootstrap.write_all(&frame(&request)).unwrap();
     let output = child.wait_with_output().unwrap();
     assert!(output.status.success(), "{output:?}");
     assert_eq!(

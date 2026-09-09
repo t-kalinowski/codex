@@ -102,9 +102,9 @@ fn inherited_signal_state_reaches_target_and_sigchld_remains_waitable() {
 fn interruption_preserves_target_status_and_retires_its_descendants() {
     let directory = tempfile::tempdir().unwrap();
     let (mut child, mut bootstrap) = spawn(runner(directory.path()).stdin(Stdio::piped()));
-    bootstrap
-        .write_all(&frame(&managed("interrupted")))
-        .unwrap();
+    let mut request = managed("interrupted");
+    request["lifecycle"]["parent_pid"] = json!(std::process::id());
+    bootstrap.write_all(&frame(&request)).unwrap();
     let mut stdout = BufReader::new(child.stdout.take().unwrap());
     let mut line = String::new();
     stdout.read_line(&mut line).unwrap();

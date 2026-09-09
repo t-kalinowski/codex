@@ -40,6 +40,7 @@ rust_test(
         "tests/lifecycle/cancellation_tests.rs",
         "tests/lifecycle/config_tests.rs",
         "tests/lifecycle/lifecycle_tests.rs",
+        "tests/lifecycle/ownership_tests.rs",
         "tests/lifecycle/prerequisite_tests.rs",
         "tests/lifecycle/retirement_tests.rs",
         "tests/lifecycle/security_tests.rs",

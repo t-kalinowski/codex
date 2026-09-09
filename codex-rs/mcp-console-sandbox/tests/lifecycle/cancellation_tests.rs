@@ -6,7 +6,8 @@ use std::time::Duration;
 use std::time::Instant;
 
 fn cancel_setup(stage: &str) {
-    for caller_death in [false, true] {
+    for loss in ["sigterm", "caller", "group"] {
+        let caller_death = loss != "sigterm";
         let directory = tempfile::tempdir().unwrap();
         let library = startup::interposer(directory.path());
         let marker = directory.path().join("target-ran");
@@ -46,6 +47,9 @@ fn cancel_setup(stage: &str) {
             &mut command,
             &[event_writer.as_raw_fd(), release.as_raw_fd()],
         );
+        if loss == "group" {
+            command.process_group(0);
+        }
         let mut child = if caller_death {
             command.spawn().unwrap()
         } else {
@@ -64,12 +68,24 @@ fn cancel_setup(stage: &str) {
         } else {
             child.id() as i32
         };
+        let _supervisor_watch = ownership::Process::watch(supervisor);
         let mut bytes = [0; 4];
         events.read_exact(&mut bytes).unwrap();
         let native = i32::from_ne_bytes(bytes);
         assert!(native > 0);
+        let _native_watch = ownership::Process::watch(native);
+        #[cfg(target_os = "linux")]
+        let _processes = ownership::watch_tree(supervisor);
         if caller_death {
-            child.kill().unwrap();
+            if loss == "group" {
+                assert_ne!(unsafe { libc::getpgrp() }, child.id() as i32);
+                assert_eq!(
+                    unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) },
+                    0
+                );
+            } else {
+                child.kill().unwrap();
+            }
             child.wait().unwrap();
         } else {
             assert_eq!(unsafe { libc::kill(supervisor, libc::SIGTERM) }, 0);
@@ -110,12 +126,12 @@ fn cancel_setup(stage: &str) {
         let output = child.wait_with_output().unwrap();
         assert!(
             completed,
-            "{stage}, caller_death={caller_death}: cancellation did not close streams: {output:?}; target executed: {}",
+            "{stage}, loss={loss}: cancellation did not close streams: {output:?}; target executed: {}",
             marker.exists()
         );
         assert!(
             !marker.exists(),
-            "{stage}, caller_death={caller_death}: target executed after cancellation"
+            "{stage}, loss={loss}: target executed after cancellation"
         );
         assert!(!std::fs::read_dir(directory.path()).unwrap().any(|entry| {
             entry
@@ -128,10 +144,7 @@ fn cancel_setup(stage: &str) {
         if !caller_death {
             assert_eq!(output.status.code(), Some(0), "{output:?}");
         }
-        assert_eq!(
-            output.stderr, b"",
-            "{stage}, caller_death={caller_death}: {output:?}"
-        );
+        assert_eq!(output.stderr, b"", "{stage}, loss={loss}: {output:?}");
     }
 }
 

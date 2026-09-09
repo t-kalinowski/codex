@@ -106,3 +106,56 @@ fn terminal_case(kind: &str) {
     assert_eq!(output.status.code(), Some(42), "{output:?}, {ready}");
     assert_eq!(line, "1\n");
 }
+
+#[test]
+fn parent_owned_terminal_input_or_output_keeps_callers_group() {
+    for terminal_fd in [0, 1] {
+        let directory = tempfile::tempdir().unwrap();
+        let (mut master, mut slave) = (-1, -1);
+        assert_eq!(
+            unsafe {
+                libc::openpty(
+                    &mut master,
+                    &mut slave,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            },
+            0
+        );
+        let master = unsafe { File::from_raw_fd(master) };
+        let slave = unsafe { File::from_raw_fd(slave) };
+        let mut command = runner(directory.path());
+        command.stdin(Stdio::piped());
+        if terminal_fd == 0 {
+            command.stdin(slave);
+        } else {
+            command.stdout(slave);
+        }
+        let mut request = fixture("terminal", &["peer"]);
+        request["lifecycle"] = json!({"parent_pid": std::process::id()});
+        let (mut child, mut bootstrap) = spawn(&mut command);
+        let _runner_watch = ownership::Process::watch(child.id() as i32);
+        drop(command);
+        bootstrap.write_all(&frame(&request)).unwrap();
+        let mut stdout: Box<dyn BufRead> = if terminal_fd == 0 {
+            Box::new(BufReader::new(child.stdout.take().unwrap()))
+        } else {
+            Box::new(BufReader::new(master))
+        };
+        let mut line = String::new();
+        stdout.read_line(&mut line).unwrap();
+        let ready: Value = serde_json::from_str(&line).unwrap();
+        #[cfg(target_os = "macos")]
+        let _target_watch = ownership::Process::watch(ready["pid"].as_i64().unwrap() as i32);
+        #[cfg(target_os = "linux")]
+        let _target_watch = ownership::watch_tree(child.id() as i32);
+        assert!(ready["pid"].as_i64().unwrap() > 0);
+        let group = unsafe { libc::getpgid(child.id() as i32) };
+        assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGINT) }, 0);
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(output.status.code(), Some(42), "{output:?}");
+        assert_eq!(group, unsafe { libc::getpgrp() });
+    }
+}

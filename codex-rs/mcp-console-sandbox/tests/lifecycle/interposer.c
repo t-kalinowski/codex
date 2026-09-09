@@ -41,13 +41,28 @@ static void checkpoint(pid_t pid) {
 static pid_t native_pid;
 static pid_t native_root;
 static int native_fd = -1;
+static int fork_child;
 
 static pid_t observed_fork(void) {
     pid_t (*real)(void) = NEXT(fork);
     pid_t pid = real();
+    if (pid == 0) {
+        fork_child = 1;
+        const char *stage = getenv("SANDBOX_TEST_CHILD_STAGE");
+        if (stage && strcmp(stage, "before") == 0) checkpoint(getpid());
+    }
     if (pid > 0) native_root = native_pid = pid;
     if (pid > 0 && getenv("SANDBOX_TEST_GATE_SPAWN")) checkpoint(pid);
     return pid;
+}
+
+static int observed_setpgid(pid_t pid, pid_t group) {
+    int (*real)(pid_t, pid_t) = NEXT(setpgid);
+    int result = real(pid, group);
+    const char *stage = getenv("SANDBOX_TEST_CHILD_STAGE");
+    if (result == 0 && fork_child && stage && strcmp(stage, "armed") == 0)
+        checkpoint(getpid());
+    return result;
 }
 
 static void ready(int fd, pid_t pid) {
@@ -139,6 +154,7 @@ static int observed_children(pid_t pid, void *buffer, int size) {
     pair_##original __attribute__((section("__DATA,__interpose"))) = \
     {(const void *)(uintptr_t)&replacement, (const void *)(uintptr_t)&original};
 INTERPOSE(observed_fork, fork)
+INTERPOSE(observed_setpgid, setpgid)
 INTERPOSE(observed_recv, recv)
 INTERPOSE(observed_send, send)
 INTERPOSE(observed_poll, poll)
@@ -148,6 +164,7 @@ INTERPOSE(observed_unlinkat, unlinkat)
 INTERPOSE(observed_children, proc_listchildpids)
 #else
 pid_t fork(void) { return observed_fork(); }
+int setpgid(pid_t pid, pid_t group) { return observed_setpgid(pid, group); }
 ssize_t send(int fd, const void *buffer, size_t size, int flags) { return observed_send(fd, buffer, size, flags); }
 int poll(struct pollfd *fds, nfds_t count, int timeout) { return observed_poll(fds, count, timeout); }
 int kill(pid_t pid, int number) { return observed_kill(pid, number); }

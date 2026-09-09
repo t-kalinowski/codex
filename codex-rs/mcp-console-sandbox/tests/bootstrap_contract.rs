@@ -9,6 +9,8 @@ mod codex;
 mod configuration;
 #[path = "lifecycle/lifecycle_tests.rs"]
 mod lifecycle;
+#[path = "lifecycle/ownership_tests.rs"]
+mod ownership;
 #[cfg(target_os = "linux")]
 #[path = "lifecycle/prerequisite_tests.rs"]
 mod prerequisite;

@@ -9,6 +9,7 @@ use crate::storage::Storage;
 use anyhow::Context;
 use anyhow::Result;
 use std::fs::File;
+use std::io::IsTerminal;
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
@@ -24,8 +25,18 @@ pub async fn run(request: Bootstrap, stdin: File, signals: Signals) -> Result<i3
         .transpose()?;
     let sigterm = request.lifecycle.sigterm;
     let timeout = Duration::from_millis(request.lifecycle.cleanup_timeout_ms.unwrap_or(1000));
-    let mut tracker = platform::Tracker::new()?;
+    // Capture foreground ownership in the caller's group, before isolating an
+    // owned stdio runner. Terminal stderr alone does not make it interactive.
     let terminal = platform::Terminal::capture()?;
+    if parent.is_some()
+        && !stdin.is_terminal()
+        && !std::io::stdout().is_terminal()
+        && unsafe { libc::getpgrp() != libc::getpid() }
+        && unsafe { libc::setpgid(0, 0) } < 0
+    {
+        return Err(std::io::Error::last_os_error()).context("isolate owned runner process group");
+    }
+    let mut tracker = platform::Tracker::new()?;
     let storage = request
         .lifecycle
         .private_tmp
@@ -88,8 +99,36 @@ pub async fn run(request: Bootstrap, stdin: File, signals: Signals) -> Result<i3
             .stdin(Stdio::from(stdin))
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit());
+        // Spawn on the current-thread runtime's main thread, which lives until
+        // retirement ends: Linux PDEATHSIG follows the creating thread. Capture
+        // the expected parent before fork, never from an already-orphaned child.
+        #[cfg(target_os = "linux")]
+        let supervisor = unsafe { libc::getpid() };
+        // SAFETY: the child hook uses only syscalls and allocation-free errors;
+        // proxy preparation may already have started other threads.
         unsafe {
             command.pre_exec(move || {
+                #[cfg(target_os = "linux")]
+                {
+                    if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    if libc::getppid() != supervisor {
+                        return Err(std::io::Error::from_raw_os_error(libc::ECHILD));
+                    }
+                    // Native helpers use TERM for their own parent-death links.
+                    // They must not inherit the supervisor's sigwait mask.
+                    let mut mask = std::mem::zeroed();
+                    libc::sigemptyset(&mut mask);
+                    for signal in crate::signals::FORWARDED.into_iter().chain([libc::SIGCHLD]) {
+                        libc::sigaddset(&mut mask, signal);
+                    }
+                    let error =
+                        libc::pthread_sigmask(libc::SIG_UNBLOCK, &mask, std::ptr::null_mut());
+                    if error != 0 {
+                        return Err(std::io::Error::from_raw_os_error(error));
+                    }
+                }
                 if libc::setpgid(0, 0) < 0 || libc::fcntl(descriptor, libc::F_SETFD, 0) < 0 {
                     return Err(std::io::Error::last_os_error());
                 }
@@ -188,10 +227,10 @@ pub async fn run(request: Bootstrap, stdin: File, signals: Signals) -> Result<i3
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    if let Some(child) = &mut child {
-        if let Err(error) = child.try_wait() {
-            errors.push(format!("reap sandbox root: {error}"));
-        }
+    if let Some(child) = &mut child
+        && let Err(error) = child.try_wait()
+    {
+        errors.push(format!("reap sandbox root: {error}"));
     }
     drop(gate);
     if let Err(error) = terminal.restore() {
