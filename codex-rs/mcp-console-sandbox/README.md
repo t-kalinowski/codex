@@ -183,8 +183,10 @@ Containers also need permission to perform native namespace operations.
 There is no automatic legacy-Landlock or unsandboxed fallback.
 Filesystem policies must allow the executable and runtime files needed by the native sandbox path.
 Linux supervision requires a restricted filesystem policy and namespace-local procfs; full-disk write policies are rejected.
-Restricted networking permits local Unix socket-pair I/O, shutdown, and socket inspection.
-Connecting, binding, listening, creating IP sockets, and sends with an explicit destination remain denied; inherited connected descriptors retain the access supplied by their caller.
+The Linux seccomp rules match the pinned upstream source.
+Without a managed proxy, restricted Linux networking permits Unix socket pairs and ordinary descriptor read/write, but denies `sendto`, `shutdown`, socket-name queries, and socket-option calls even on local pairs.
+Connecting, binding, listening, and creating IP sockets remain denied.
+The [MCP Console handoff](MCP_CONSOLE_HANDOFF.md) describes the resulting sideband requirements.
 
 Without a caller-supplied extension, the ordinary macOS profile retains its existing sysctl, Mach-service, terminal, and filesystem restrictions.
 Applications may need caller-owned compatibility rules for operations outside those native permissions.

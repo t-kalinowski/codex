@@ -26,11 +26,12 @@ The [protocol](PROTOCOL.md) specifies both launch modes. The [lifecycle contract
 ## Compatibility changes in the patch set
 
 - **Prompt stdin closure on Linux.** Native waiting helpers release their copies of the target's original stdin. Bubblewrap receives it through a temporary extra descriptor so its host monitor does not retain a reader. The caller can observe target-side closure while the target is still alive. Binary bytes, regular-file offsets and shared seeks, and terminal identity are preserved without a relay.
-- **Local socket operations with restricted Linux networking.** The seccomp filter permits connected socket-pair I/O, shutdown, socket-name inspection, and socket-option operations. It permits `sendto` only with a null destination. This is a compatibility relaxation of the upstream deny rules, not an additional network restriction. Connecting, binding, listening, creating IP sockets, and sending to an explicit destination remain denied in this mode. Inherited connected descriptors retain the authority supplied by their caller.
 
 ## Upstream behavior reused and limits
 
 Filesystem read/write rules, network denial or enablement, proxy domain and Unix-socket policy, and native proxy routing come from the pinned upstream implementations. The runner owns the proxy lifetime but adds no new proxy protocol or policy engine. Linux still uses ordinary bubblewrap, namespace init, and seccomp; macOS uses the upstream Seatbelt profile plus any explicitly selected additions above. Ordinary binary stdio and exit-code propagation are retained behaviors, not new sandbox mechanisms.
+
+The Linux network seccomp rules match the pinned upstream source. Without a managed proxy, restricted networking permits Unix socket pairs and descriptor `read`/`write`, but denies `sendto`, `shutdown`, socket-name queries, and socket-option calls even on local pairs. The native startup gate uses descriptor I/O on its existing socket. See the [MCP Console handoff](MCP_CONSOLE_HANDOFF.md) for adapting a persistent sideband without relaxing that policy.
 
 Private storage adds a writable location; it does not remove other caller-granted write access. No MCP Console policy defaults are embedded. There is no watchdog or custom recovery after the sole supervisor crashes or receives SIGKILL. Surviving workloads retain native restrictions, but cleanup and terminal restoration are then not guaranteed. Windows, job suspension/resumption, and application restart are outside scope.
 
