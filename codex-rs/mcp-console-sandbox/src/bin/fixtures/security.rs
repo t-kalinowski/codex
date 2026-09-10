@@ -19,6 +19,7 @@ pub fn adversary() -> Result<()> {
     {
         assert!(std::fs::read_dir(format!("/proc/{supervisor}/fd")).is_err());
         assert!(std::fs::File::open(format!("/proc/{supervisor}/mem")).is_err());
+        assert!(std::fs::File::open(format!("/proc/{supervisor}/environ")).is_err());
         assert_eq!(
             std::fs::read_link("/proc/self")?,
             std::path::PathBuf::from(std::process::id().to_string())
@@ -34,6 +35,39 @@ pub fn adversary() -> Result<()> {
             libc::KERN_SUCCESS,
             "target obtained supervisor task port"
         );
+        let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, supervisor];
+        let mut buffer = vec![0u8; 1024 * 1024];
+        let mut length = buffer.len();
+        assert_eq!(
+            unsafe {
+                libc::sysctl(
+                    mib.as_mut_ptr(),
+                    3,
+                    buffer.as_mut_ptr().cast(),
+                    &mut length,
+                    std::ptr::null_mut(),
+                    0,
+                )
+            },
+            -1,
+            "target read supervisor launch environment"
+        );
+        let mut peer = std::process::Command::new("/bin/sleep").arg("30").spawn()?;
+        mib[2] = peer.id() as i32;
+        length = buffer.len();
+        let result = unsafe {
+            libc::sysctl(
+                mib.as_mut_ptr(),
+                3,
+                buffer.as_mut_ptr().cast(),
+                &mut length,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        peer.kill()?;
+        peer.wait()?;
+        assert_eq!(result, 0, "same-sandbox process inspection was denied");
     }
     // Setting a transport-looking variable inside the workload has no effect.
     unsafe {

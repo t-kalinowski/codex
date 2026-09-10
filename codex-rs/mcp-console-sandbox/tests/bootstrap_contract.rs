@@ -549,15 +549,15 @@ fn launch_does_not_wait_for_more_input_or_eof() {
 #[test]
 fn linux_prefers_a_suitable_host_bwrap() {
     let staging = tempfile::tempdir().unwrap();
-    let command = runner(staging.path());
+    let mut command = runner(staging.path());
     let host = staging.path().join("host");
     std::fs::create_dir(&host).unwrap();
     copy_executable(
         &cargo_bin("mcp-console-sandbox-fixture").unwrap(),
         &host.join("bwrap"),
     );
-    let mut request = request(&["/bin/echo", "target"]);
-    request["environment"]["PATH"] = json!(host);
+    let request = request(&["/bin/echo", "target"]);
+    command.env("PATH", host);
     let output = run_command(command, frame(&request), &[]);
     assert_eq!(output.status.code(), Some(97), "{output:?}");
     assert_eq!(output.stdout, b"");
@@ -568,7 +568,7 @@ fn linux_prefers_a_suitable_host_bwrap() {
 fn linux_uses_the_ordinary_bundle_when_host_bwrap_is_missing_or_unsuitable() {
     for unsuitable in [false, true] {
         let staging = tempfile::tempdir().unwrap();
-        let command = runner(staging.path());
+        let mut command = runner(staging.path());
         let host = staging.path().join("host");
         std::fs::create_dir(&host).unwrap();
         if unsuitable {
@@ -577,8 +577,8 @@ fn linux_uses_the_ordinary_bundle_when_host_bwrap_is_missing_or_unsuitable() {
                 &host.join("bwrap"),
             );
         }
-        let mut request = request(&["/bin/echo", "target"]);
-        request["environment"] = json!({"PATH": host, "TEST_BWRAP_UNSUITABLE": "1"});
+        let request = request(&["/bin/echo", "target"]);
+        command.env("PATH", host).env("TEST_BWRAP_UNSUITABLE", "1");
         let output = run_command(command, frame(&request), &[]);
         assert!(output.status.success(), "{output:?}");
         assert_eq!(output.stdout, b"target\n");
@@ -590,19 +590,18 @@ fn linux_uses_the_ordinary_bundle_when_host_bwrap_is_missing_or_unsuitable() {
 #[test]
 fn linux_host_bwrap_without_argv0_can_reexec_the_native_helper() {
     let staging = tempfile::tempdir().unwrap();
-    let command = runner(staging.path());
+    let mut command = runner(staging.path());
     let host = staging.path().join("host");
     std::fs::create_dir(&host).unwrap();
     copy_executable(
         &cargo_bin("mcp-console-sandbox-fixture").unwrap(),
         &host.join("bwrap"),
     );
-    let mut request = request(&["/bin/echo", "target"]);
-    request["environment"] = json!({
-        "PATH": host,
-        "TEST_BWRAP_NO_ARGV0": "1",
-        "TEST_BWRAP_EXECUTABLE": cargo_bin("bwrap").unwrap()
-    });
+    let request = request(&["/bin/echo", "target"]);
+    command
+        .env("PATH", host)
+        .env("TEST_BWRAP_NO_ARGV0", "1")
+        .env("TEST_BWRAP_EXECUTABLE", cargo_bin("bwrap").unwrap());
     let output = run_command(command, frame(&request), &[]);
     assert!(output.status.success(), "{output:?}");
     assert_eq!(output.stdout, b"target\n");

@@ -35,6 +35,23 @@ fn main() -> anyhow::Result<()> {
     }
     let operation = args.next().context("fixture operation")?;
     match operation.as_str() {
+        "probe-write" => match std::fs::write(args.next().context("probe path")?, b"escaped") {
+            Ok(()) => println!("write allowed"),
+            Err(error)
+                if matches!(
+                    error.raw_os_error(),
+                    Some(libc::EACCES | libc::EPERM | libc::EROFS)
+                ) =>
+            {
+                println!("write denied")
+            }
+            Err(error) => return Err(error.into()),
+        },
+        "environment-copy" => environment_copy::run(
+            args.next().context("runner executable")?,
+            args.next().context("interposer library")?,
+            args.next().context("forbidden path")?,
+        )?,
         "foreground-peer" => terminal::peer(args)?,
         "terminal" => terminal::target(&args.next().context("terminal kind")?)?,
         "adversary" => security::adversary()?,
@@ -282,6 +299,9 @@ fn main() -> anyhow::Result<()> {
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn main() {}
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[path = "fixtures/environment_copy.rs"]
+mod environment_copy;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[path = "fixtures/lifecycle.rs"]
 mod lifecycle;

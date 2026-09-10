@@ -78,6 +78,15 @@ fn run() -> anyhow::Result<i32> {
         bootstrap::Input::Descriptor(file) => bootstrap::read(file, &signals)?,
         bootstrap::Input::Environment(request) => *request,
     };
+    for name in &request.excluded_environment {
+        // SAFETY: this standalone child is still single-threaded, before Tokio
+        // or proxy setup. Callers never mutate their own parent environment.
+        // This prevents helper-library configuration; native isolation, not
+        // absence of a variable, protects the accepted policy.
+        unsafe {
+            std::env::remove_var(name);
+        }
+    }
     // SAFETY: this executable owns fd 0 and adopts it exactly once, without
     // reading it. Rust startup supplies /dev/null if it was closed at invocation.
     let stdin = unsafe { File::from_raw_fd(libc::STDIN_FILENO) };

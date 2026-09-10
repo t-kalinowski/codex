@@ -14,12 +14,13 @@ use std::os::fd::AsRawFd;
 use std::os::fd::FromRawFd;
 
 const MAX_PAYLOAD_BYTES: usize = 1024 * 1024;
+const RESERVED_CONFIGURATION: &str = "MCP_CONSOLE_SANDBOX_CONFIG";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Bootstrap {
     #[serde(skip)]
-    pub excluded_environment: Option<String>,
+    pub excluded_environment: Vec<String>,
     pub version: u32,
     pub command: Vec<String>,
     pub cwd: AbsolutePathBuf,
@@ -42,6 +43,14 @@ struct EnvironmentConfiguration {
     macos_seatbelt_profile_extension: Option<String>,
     #[serde(default)]
     lifecycle: Lifecycle,
+    #[serde(default = "inherit_environment")]
+    inherit_environment: bool,
+    #[serde(default)]
+    environment: HashMap<String, String>,
+}
+
+fn inherit_environment() -> bool {
+    true
 }
 
 pub enum Input {
@@ -63,16 +72,38 @@ pub fn take_input() -> Result<Input> {
             !name.is_empty() && !name.contains('='),
             "invalid configuration variable name"
         );
-        let payload =
-            std::env::var(name).context("read selected configuration environment variable")?;
+        let payload = std::env::var(name).map_err(|error| match error {
+            std::env::VarError::NotPresent => {
+                anyhow::anyhow!("selected configuration variable is not set")
+            }
+            std::env::VarError::NotUnicode(_) => {
+                anyhow::anyhow!("selected configuration value must be UTF-8")
+            }
+        })?;
         ensure!(
             payload.len() <= MAX_PAYLOAD_BYTES,
             "configuration exceeds 1048576 bytes"
         );
-        let config: EnvironmentConfiguration =
-            serde_json::from_str(&payload).context("invalid configuration JSON")?;
-        let request = Bootstrap {
-            excluded_environment: Some(name.to_owned()),
+        let config: EnvironmentConfiguration = parse_json(payload.as_bytes())?;
+        let mut environment = if config.inherit_environment {
+            std::env::vars_os()
+                .filter(|(key, _)| key != name && key != RESERVED_CONFIGURATION)
+                .map(|(key, value)| {
+                    Ok((
+                        key.into_string()
+                            .map_err(|_| anyhow::anyhow!("environment key must be UTF-8"))?,
+                        value
+                            .into_string()
+                            .map_err(|_| anyhow::anyhow!("environment value must be UTF-8"))?,
+                    ))
+                })
+                .collect::<Result<HashMap<_, _>>>()?
+        } else {
+            HashMap::new()
+        };
+        environment.extend(config.environment);
+        let mut request = Bootstrap {
+            excluded_environment: vec![name.to_owned()],
             version: config.version,
             command: args[3..]
                 .iter()
@@ -83,33 +114,14 @@ pub fn take_input() -> Result<Input> {
                 })
                 .collect::<Result<_>>()?,
             cwd: AbsolutePathBuf::try_from(std::env::current_dir()?)?,
-            environment: std::env::vars_os()
-                .filter(|(key, _)| key != name)
-                .map(|(key, value)| {
-                    Ok((
-                        key.into_string()
-                            .map_err(|_| anyhow::anyhow!("environment key must be UTF-8"))?,
-                        value
-                            .into_string()
-                            .map_err(|_| anyhow::anyhow!("environment value must be UTF-8"))?,
-                    ))
-                })
-                .collect::<Result<_>>()?,
+            environment,
             filesystem: config.filesystem,
             network: config.network,
             proxy: config.proxy,
             macos_seatbelt_profile_extension: config.macos_seatbelt_profile_extension,
             lifecycle: config.lifecycle,
         };
-        validate(&request)?;
-        ensure!(
-            request
-                .lifecycle
-                .private_tmp
-                .as_ref()
-                .is_none_or(|tmp| !tmp.environment.iter().any(|key| key == name)),
-            "configuration transport variable cannot be exported to the target"
-        );
+        validate(&mut request)?;
         return Ok(Input::Environment(Box::new(request)));
     }
     take_inherited().map(Input::Descriptor)
@@ -161,14 +173,51 @@ pub fn read(mut bootstrap: File, signals: &crate::signals::Signals) -> Result<Bo
     );
     let mut payload = vec![0; size];
     read_cancellable(&mut bootstrap, &mut payload, signals).context("read bootstrap payload")?;
-    let request: Bootstrap = serde_json::from_slice(&payload).context("invalid bootstrap JSON")?;
-    validate(&request)?;
+    let mut request: Bootstrap = parse_json(&payload)?;
+    validate(&mut request)?;
     drop(bootstrap);
     Ok(request)
 }
 
-fn validate(request: &Bootstrap) -> Result<()> {
+fn parse_json<T: serde::de::DeserializeOwned>(payload: &[u8]) -> Result<T> {
+    // Serde's data errors may quote an entire invalid value, including a target
+    // environment map. Report location and category without echoing input.
+    serde_json::from_slice(payload).map_err(|error| {
+        anyhow::anyhow!(
+            "invalid configuration JSON ({:?} at line {}, column {})",
+            error.classify(),
+            error.line(),
+            error.column()
+        )
+    })
+}
+
+fn validate(request: &mut Bootstrap) -> Result<()> {
     request.lifecycle.validate()?;
+    request
+        .excluded_environment
+        .push(RESERVED_CONFIGURATION.to_owned());
+    for name in &request.excluded_environment {
+        request.environment.remove(name);
+        ensure!(
+            request
+                .lifecycle
+                .private_tmp
+                .as_ref()
+                .is_none_or(|tmp| !tmp.environment.contains(name)),
+            "configuration transport variable cannot be exported to the target"
+        );
+    }
+    for (name, value) in &request.environment {
+        ensure!(
+            !name.is_empty() && !name.contains(['=', '\0']),
+            "invalid target environment name"
+        );
+        ensure!(
+            !value.contains('\0'),
+            "target environment value contains NUL"
+        );
+    }
     ensure!(
         request.version == 2,
         "unsupported bootstrap version {}",

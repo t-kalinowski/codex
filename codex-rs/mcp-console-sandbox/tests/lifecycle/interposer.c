@@ -38,6 +38,16 @@ static void checkpoint(pid_t pid) {
     if (release && read(atoi(release), &byte, 1) != 1) _exit(125);
 }
 
+__attribute__((constructor)) static void before_configuration_parse(void) {
+    if (!getenv("SANDBOX_TEST_BEFORE_PARSE")) return;
+    checkpoint(getpid());
+    unsetenv("SANDBOX_TEST_BEFORE_PARSE");
+    unsetenv("SANDBOX_TEST_EVENT_FD");
+    unsetenv("SANDBOX_TEST_RELEASE_FD");
+    unsetenv("LD_PRELOAD");
+    unsetenv("DYLD_INSERT_LIBRARIES");
+}
+
 static pid_t native_pid;
 static pid_t native_root;
 static int native_fd = -1;

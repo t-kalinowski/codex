@@ -91,19 +91,6 @@ mod upstream {
             !filesystem.has_full_disk_write_access(),
             "supervised Linux execution requires a restricted filesystem policy"
         );
-        let mut late_environment = environment
-            .iter()
-            .filter(|(name, _)| {
-                name.starts_with("LD_")
-                    || name.starts_with("DYLD_")
-                    || request
-                        .lifecycle
-                        .private_tmp
-                        .as_ref()
-                        .is_some_and(|tmp| tmp.environment.contains(name))
-            })
-            .map(|(name, value)| (name.clone(), value.clone()))
-            .collect::<std::collections::HashMap<_, _>>();
         let proxy = if let Some(config) = request.proxy {
             Some(
                 NetworkProxy::builder()
@@ -116,24 +103,25 @@ mod upstream {
         } else {
             None
         };
-        let managed_network = if let Some(proxy) = &proxy {
-            let prepared = proxy
-                .prepare_for_optional_environment(environment, /*environment_id*/ None)?;
-            environment = prepared.env;
-            Some(prepared.sandbox_context)
+        let (managed_network, mut proxy_environment) = if let Some(proxy) = &proxy {
+            let prepared = proxy.prepare_for_optional_environment(
+                Default::default(),
+                /*environment_id*/ None,
+            )?;
+            (Some(prepared.sandbox_context), prepared.env)
         } else {
-            None
+            (None, Default::default())
         };
         // Native proxy overrides take precedence over ordinary target inputs.
-        late_environment.retain(|name, value| environment.get(name) == Some(value));
-        if let Some(name) = &request.excluded_environment {
+        environment.extend(proxy_environment.clone());
+        for name in &request.excluded_environment {
             environment.remove(name);
-            late_environment.remove(name);
+            proxy_environment.remove(name);
         }
         let setup = TargetSetup {
             signals,
             environment,
-            late_environment,
+            proxy_environment: proxy_environment.keys().cloned().collect(),
             excluded_environment: request.excluded_environment,
             command: request.command,
             seatbelt: None,
@@ -160,6 +148,12 @@ mod upstream {
                 profile.policy.push('\n');
                 profile.policy.push_str(&extension);
             }
+            // KERN_PROCARGS2 can expose the host's launch environment despite
+            // deny-default and the ordinary same-sandbox process-info allowance.
+            // Explicitly deny outside-sandbox reads while retaining peer queries.
+            profile
+                .policy
+                .push_str("\n(deny process-info-pidinfo (require-not (target same-sandbox)))\n");
             if let Some(storage) = storage {
                 // Disposable data may replace its own root; unlike an upstream
                 // writable authority, this path is never reused for another job.
@@ -205,14 +199,28 @@ mod upstream {
                 PermissionProfile::from_runtime_permissions(&filesystem, request.network);
             let cwd = PathUri::from(request.cwd.clone());
             let executable = std::env::current_exe()?;
-            // Private TMPDIR must not host native mount bookkeeping, which
-            // would prevent the workload from replacing its disposable data.
-            let helper_env = setup
-                .environment
-                .iter()
-                .filter(|(key, _)| !setup.late_environment.contains_key(*key))
-                .map(|(key, value)| (key.clone(), value.clone()))
-                .collect();
+            // Target PATH, TMPDIR, loader, proxy and control-looking variables
+            // must not select or configure host helpers. Only the trusted launch
+            // environment and the prepared proxy context reach native setup.
+            let mut helper_env = std::collections::HashMap::new();
+            for (key, value) in std::env::vars_os() {
+                let key = key
+                    .into_string()
+                    .map_err(|_| anyhow::anyhow!("host environment key must be UTF-8"))?;
+                if key.starts_with("LD_")
+                    || key.starts_with("DYLD_")
+                    || setup.excluded_environment.contains(&key)
+                {
+                    continue;
+                }
+                helper_env.insert(
+                    key,
+                    value
+                        .into_string()
+                        .map_err(|_| anyhow::anyhow!("host environment value must be UTF-8"))?,
+                );
+            }
+            helper_env.extend(proxy_environment);
             let native = SandboxManager::default().transform(SandboxTransformRequest {
                 command: SandboxCommand {
                     program: setup.command[0].clone().into(),
@@ -242,7 +250,7 @@ mod upstream {
             command
         };
         command.current_dir(request.cwd.as_path());
-        if let Some(name) = &setup.excluded_environment {
+        for name in &setup.excluded_environment {
             command.env_remove(name);
         }
         let handle = if let Some(proxy) = proxy {

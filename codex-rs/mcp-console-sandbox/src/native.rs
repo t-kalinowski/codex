@@ -18,8 +18,8 @@ use std::process::Command;
 pub struct TargetSetup {
     pub signals: crate::signals::SignalState,
     pub environment: HashMap<String, String>,
-    pub late_environment: HashMap<String, String>,
-    pub excluded_environment: Option<String>,
+    pub proxy_environment: Vec<String>,
+    pub excluded_environment: Vec<String>,
     pub command: Vec<String>,
     pub seatbelt: Option<Seatbelt>,
 }
@@ -59,10 +59,18 @@ pub fn linux_target_setup(command: &mut Command, descriptor: OwnedFd) -> std::io
         return Err(std::io::Error::last_os_error());
     }
     let setup = accept(descriptor).map_err(std::io::Error::other)?;
-    // Preserve namespace-local proxy endpoints. Loader and private-directory
-    // variables take effect only here, after enforcement and helper setup.
-    command.envs(setup.late_environment);
-    if let Some(name) = setup.excluded_environment {
+    // Install the target environment only after enforcement and helper setup.
+    // Only managed proxy values rewritten in the namespace cross this boundary.
+    command.env_clear().envs(&setup.environment);
+    if !setup.environment.contains_key("PWD") {
+        command.env("PWD", std::env::current_dir()?);
+    }
+    for name in setup.proxy_environment {
+        let value = std::env::var_os(&name)
+            .ok_or_else(|| std::io::Error::other("missing native proxy environment"))?;
+        command.env(name, value);
+    }
+    for name in setup.excluded_environment {
         command.env_remove(name);
     }
     unsafe {

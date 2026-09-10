@@ -1,13 +1,6 @@
 # What this patch set adds to the native sandbox
 
-This inventory covers the complete branch relative to Codex
-`rust-v0.150.1`, commit `90854393966b21e9ebfd21b122334eb09a20c93d`. It
-compares the standalone runner with that release's native sandbox entry
-points, including `codex sandbox`. Codex already has process management,
-Linux namespace-init cleanup, filesystem and network enforcement, and a
-managed proxy. The additions below make supervision and resource cleanup
-part of one standalone executable contract; they are not claims that
-every other Codex execution path lacks those behaviors.
+This inventory covers the complete branch relative to Codex `rust-v0.150.1`, commit `90854393966b21e9ebfd21b122334eb09a20c93d`. It compares the standalone runner with that release's native sandbox entry points, including `codex sandbox`. Codex already has process management, Linux namespace-init cleanup, filesystem and network enforcement, and a managed proxy. The additions below make supervision and resource cleanup part of one standalone executable contract; they are not claims that every other Codex execution path lacks those behaviors.
 
 ## Added capabilities
 
@@ -24,78 +17,25 @@ every other Codex execution path lacks those behaviors.
 | Signals and terminal ownership through supervision | The final native execution boundary restores inherited ignored dispositions and the complete signal mask after subprocess-library resets. The supervisor can still wait for its children. Platform-specific terminal handling preserves foreground peers and delivers interrupts through the supervised launch. A caller needs no signal-restoration wrapper. |
 | Caller-supplied macOS rules                        | `macos_seatbelt_profile_extension` appends trusted SBPL to the upstream profile in the same sandbox initialization. It can restrict operations such as access to existing host PTYs, or grant otherwise denied operations. These rules are optional and can loosen policy; they are not validated as deny-only.                                               |
 
-The [protocol](PROTOCOL.md) specifies both launch modes. The
-[lifecycle contract](LIFECYCLE.md) defines defaults, ordering, platform
-boundaries, and the behavior-to-test mapping.
+The [protocol](PROTOCOL.md) specifies both launch modes. The [lifecycle contract](LIFECYCLE.md) defines defaults, ordering, platform boundaries, and the behavior-to-test mapping.
 
 ## Additional restrictions enforced by the runner
 
-- **Fixed configuration and private control resources.** Accepted
-  configuration is owned memory, with no files, automatic fallback,
-  reload, or mutation interface. Environment-mode configuration is
-  captured from the child environment; descriptor-mode configuration
-  becomes fixed at request acceptance. The selected transport variable
-  is excluded from helpers and target, the bootstrap descriptor closes
-  before native setup, and the execution-gate descriptor closes before
-  target code. Unrelated inherited descriptors above stdio do not reach
-  the target. Same-user adversarial tests check that a restricted target
-  cannot change accepted policy or obtain supervisor process-control
-  resources.
-- **Required Linux isolation.** Supervised Linux launches require a
-  restricted filesystem policy, PID namespaces, and namespace-local
-  procfs. Full-disk write policies, the legacy Landlock path, and
-  host-procfs fallback are rejected for this interface. This prevents
-  the target from obtaining host process identities and descriptors
-  through a host procfs. Namespace or policy setup failure does not
-  launch an unrestricted target.
-- **Target environment applied at the native boundary.** Target loader
-  variables and private-directory exports are withheld from Linux
-  helpers until enforcement is established; the macOS native stage
-  starts with an empty environment. This keeps target loader code out of
-  host-side setup and keeps helper bookkeeping out of disposable target
-  storage. The caller still owns the initial supervisor executable and
-  loader environment.
+- **Fixed configuration and private control resources.** Accepted configuration is owned memory, with no files, automatic fallback, reload, or mutation interface. Environment-mode configuration is captured from the child environment; descriptor-mode configuration becomes fixed at request acceptance. The selected transport variable is excluded from helpers and target, the bootstrap descriptor closes before native setup, and the execution-gate descriptor closes before target code. Unrelated inherited descriptors above stdio do not reach the target. Same-user adversarial tests check that a restricted target cannot change accepted policy or obtain supervisor process-control resources.
+- **Required Linux isolation.** Supervised Linux launches require a restricted filesystem policy, PID namespaces, and namespace-local procfs. Full-disk write policies, the legacy Landlock path, and host-procfs fallback are rejected for this interface. This prevents the target from obtaining host process identities and descriptors through a host procfs. Namespace or policy setup failure does not launch an unrestricted target.
+- **Target environment applied at the native boundary.** All target overrides and private-directory exports are withheld from Linux helpers until enforcement is established; the macOS native stage starts with an empty environment. This keeps target loader code out of host-side setup and keeps helper bookkeeping out of disposable target storage. The caller still owns the initial supervisor executable and loader environment.
+- **Host launch environment isolation on macOS.** An explicit native `process-info-pidinfo` denial for targets outside the sandbox prevents `KERN_PROCARGS2` reads of supervisor arguments and environment. Process inspection within the sandbox remains available.
 
 ## Compatibility changes in the patch set
 
-- **Prompt stdin closure on Linux.** Native waiting helpers release
-  their copies of the target's original stdin. Bubblewrap receives it
-  through a temporary extra descriptor so its host monitor does not
-  retain a reader. The caller can observe target-side closure while the
-  target is still alive. Binary bytes, regular-file offsets and shared
-  seeks, and terminal identity are preserved without a relay.
+- **Prompt stdin closure on Linux.** Native waiting helpers release their copies of the target's original stdin. Bubblewrap receives it through a temporary extra descriptor so its host monitor does not retain a reader. The caller can observe target-side closure while the target is still alive. Binary bytes, regular-file offsets and shared seeks, and terminal identity are preserved without a relay.
 
 ## Upstream behavior reused and limits
 
-Filesystem read/write rules, network denial or enablement, proxy domain
-and Unix-socket policy, and native proxy routing come from the pinned
-upstream implementations. The runner owns the proxy lifetime but adds no
-new proxy protocol or policy engine. Linux still uses ordinary
-bubblewrap, namespace init, and seccomp; macOS uses the upstream
-Seatbelt profile plus any explicitly selected additions above. Ordinary
-binary stdio and exit-code propagation are retained behaviors, not new
-sandbox mechanisms.
+Filesystem read/write rules, network denial or enablement, proxy domain and Unix-socket policy, and native proxy routing come from the pinned upstream implementations. The runner owns the proxy lifetime but adds no new proxy protocol or policy engine. Linux still uses ordinary bubblewrap, namespace init, and seccomp; macOS uses the upstream Seatbelt profile plus any explicitly selected additions above. Ordinary binary stdio and exit-code propagation are retained behaviors, not new sandbox mechanisms.
 
-The Linux network seccomp rules match the pinned upstream source.
-Without a managed proxy, restricted networking permits Unix socket pairs and descriptor
-`read`/`write`, but denies `sendto`, `shutdown`, socket-name queries, and
-socket-option calls even on local pairs. The native startup gate uses
-descriptor I/O on its existing socket. See the
-[MCP Console handoff](MCP_CONSOLE_HANDOFF.md) for adapting a persistent
-sideband without relaxing that policy.
+The Linux network seccomp rules match the pinned upstream source. Without a managed proxy, restricted networking permits Unix socket pairs and descriptor `read`/`write`, but denies `sendto`, `shutdown`, socket-name queries, and socket-option calls even on local pairs. The native startup gate uses descriptor I/O on its existing socket. See the [MCP Console handoff](MCP_CONSOLE_HANDOFF.md) for adapting a persistent sideband without relaxing that policy.
 
-Private storage adds a writable location; it does not remove other
-caller-granted write access. No MCP Console policy defaults are
-embedded. There is no watchdog or custom recovery after the sole
-supervisor crashes or receives SIGKILL. Linux workload termination after
-native readiness follows the
-[documented parent-death chain](LIFECYCLE.md#owned-stdio-process-groups-and-linux-parent-death).
-On macOS, surviving workloads retain native restrictions. Private-directory
-deletion and terminal restoration are not guaranteed after runner death.
-Windows, job suspension/resumption, and application restart are outside scope.
+Private storage adds a writable location; it does not remove other caller-granted write access. No MCP Console policy defaults are embedded. There is no watchdog or custom recovery after the sole supervisor crashes or receives SIGKILL. Linux workload termination after native readiness follows the [documented parent-death chain](LIFECYCLE.md#owned-stdio-process-groups-and-linux-parent-death). On macOS, surviving workloads retain native restrictions. Private-directory deletion and terminal restoration are not guaranteed after runner death. Windows, job suspension/resumption, and application restart are outside scope.
 
-See [INTEGRATION.md](INTEGRATION.md) for the self-contained modules,
-upstream edits, security-sensitive dependencies, and reapplication
-checks. [REBASE.md](REBASE.md) records earlier stages; its historical
-descriptions do not override this inventory or the current lifecycle
-contract.
+See [INTEGRATION.md](INTEGRATION.md) for the self-contained modules, upstream edits, security-sensitive dependencies, and reapplication checks. [REBASE.md](REBASE.md) records earlier stages; its historical descriptions do not override this inventory or the current lifecycle contract.
