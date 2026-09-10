@@ -27,7 +27,7 @@ Both [input modes](PROTOCOL.md) accept this optional object:
 | `private_tmp`        | Absent/null creates no private directory. Otherwise the supervisor creates a mode-0700 container and writable `data` child. Each explicitly named environment variable receives the absolute data path. The optional absolute `parent` defaults to the supervisor's native temporary directory. An empty export list is allowed. |
 | `cleanup_timeout_ms` | Absent/null uses 1000 ms. Values 1–60000 bound descendant retirement after completion or cancellation; this is not a target execution timeout or a filesystem deletion deadline.                                                                                                                                                 |
 
-Unknown lifecycle fields and invalid names/values fail before target execution. No application policy defaults are inferred. The supervisor reads no policy files and exposes no reload or mutation interface.
+Unknown lifecycle fields and invalid names/values fail before target execution. Private storage adds a writable location without removing other caller-granted write access. Cleanup handles replacement data directories, mode-zero directories, and symlinks without following them outside the private container. No application policy defaults are inferred.
 
 ## Sequencing and observable behavior
 
@@ -37,7 +37,7 @@ The supervisor forwards HUP, INT, QUIT, and optionally TERM. Inherited ignored o
 
 A completed native root's status takes precedence over pending cancellation. On normal/nonzero exit, interruption, or configured retirement, the supervisor retires descendants, restores terminal ownership, stops the proxy, and removes private storage. Only then does it return the target's exit code, `128 + signal`, or the configured retirement status. Discovery, termination, timeout, terminal restoration, proxy, and deletion errors produce a nonzero result and a stderr diagnostic. A discovery/termination failure remains an error even if a later pass finds no process; private storage is retained when retirement cannot be established. There is no successful-cleanup acknowledgment or preserve-marker escape hatch.
 
-An incomplete framed request is cancellable without transport EOF. Before that request is accepted, no lifecycle options are available and cancellation is a startup error. Target stdin is never parsed, copied, or relayed. Its original open file description, binary bytes, offset, seekability, and terminal identity are preserved. Waiting processes release their stdin copies so target-side closure is visible immediately. Stdout/stderr carry target bytes directly, with supervisor errors on stderr.
+An incomplete framed request is cancellable without transport EOF. Before acceptance, no lifecycle options are available and cancellation is a startup error. [PROTOCOL.md](PROTOCOL.md#framed-descriptor-configuration) defines direct stdio inheritance and prompt target-stdin closure.
 
 macOS transfers an exclusively owned foreground terminal to the target group and restores it after retirement. If the caller group has a peer, that group retains ownership and the supervisor relays terminal signals. Linux retains the caller's foreground ownership while bubblewrap creates the target session; inherited terminal descriptors remain usable and terminal INT is relayed through the namespace init.
 
@@ -65,7 +65,7 @@ A pidfd captured from kernel readiness credentials permits termination of a stop
 
 Explicit Landlock execution replaces the runner with the native helper and then the target. It has no supervisor, private storage, caller-death cleanup, or descendant retirement. It rejects lifecycle options that would request those guarantees and rejects managed proxy routing instead of switching backend. Landlock applies filesystem and network policy but does not isolate same-user signals.
 
-Linux's restricted-network seccomp rules are unchanged from upstream, including denials of socket-specific operations on local pairs when no managed proxy is used. The native execution gate uses permitted descriptor read/write on its private socket; the kernel still supplies the readiness sender's identity. Persistent application sidebands must obey the same rules; see [MCP_CONSOLE_HANDOFF.md](MCP_CONSOLE_HANDOFF.md).
+The native execution gate uses permitted descriptor read/write on its private socket; the kernel supplies the readiness sender's identity. Application sidebands must also obey the [upstream restricted-network rules](PROTOCOL.md#network-and-target-environment).
 
 The supervisor observes root completion without reaping it and preserves that identity until retirement finishes. On Darwin it also enumerates and retires live members of the original owned process group, including children orphaned before fork-event discovery. A separate host process outside that group is not part of this retirement.
 

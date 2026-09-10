@@ -15,7 +15,19 @@ The comparison starts at the former downstream pin `d488fc969da435f93ea5937c7f28
 | Explicit Landlock filesystem/network backend              | Rejected                                                  | Direct exec, native policy checks, no process isolation or supervised lifecycle |
 | Unavailable namespace operations with bubblewrap selected | Failure                                                   | Failure; no backend switch                                                      |
 
-The tested Linux baseline is x86_64 Ubuntu with kernel `6.8.0-139-generic`. This is a tested baseline, not a claimed minimum. Namespace permissions, procfs availability, seccomp, and the selected backend's enforcement capabilities determine whether a host works. The constrained-host tests deny pidfd and subreaper syscalls in the actual runner and helpers. Fault fixtures also withhold native wait status and stop namespace init. A kernel version string cannot establish these permissions.
+The comparison's tested baseline is x86_64 Ubuntu with kernel `6.8.0-139-generic`, not a claimed minimum. [REBASE.md](REBASE.md#validation-of-the-01540-reapplication) records later platform results. The constrained-host tests deny pidfd and subreaper syscalls in the runner and helpers; fault fixtures also withhold native wait status and stop namespace init.
+
+## Host requirements
+
+Bubblewrap execution needs mounted procfs, permission for the selected helper's namespace operations, and the requested seccomp/network enforcement capabilities. A fresh procfs mount is optional: the inherited view retains user, mount, and PID isolation, but exposes permitted host PIDs and metadata. Process tools that assume procfs PIDs match namespace PIDs may not work there. Supervision requires a restricted filesystem policy; full-disk-write policies are rejected because writable procfs could expose the supervisor.
+
+This command probes namespace permissions:
+
+```console
+unshare --user --map-root-user --mount --net --pid --fork true
+```
+
+Ubuntu AppArmor can block setup even with `kernel.unprivileged_userns_clone=1` and nonzero `user.max_user_namespaces`. Errors such as `setting up uid map: Permission denied` or `loopback: Failed RTM_NEWADDR: Operation not permitted` can reflect that restriction. The repository's Linux CI setup enables namespaces and removes the restriction on its runner; containers also need permission for native namespace operations. A kernel version alone does not establish these capabilities. Failure never selects Landlock or an unsandboxed target automatically.
 
 ## Procfs evidence
 
@@ -27,8 +39,8 @@ Inherited procfs exposed host PIDs. Access through host `environ`, `root`, `cwd`
 
 The downstream executable tests repeat the matrix against the supervised runner, including a real nested mount that makes the native procfs preflight choose its supported fallback. They also attempt to read the supervisor's launch environment, write its memory, acquire an intentionally inherited host control pipe, and signal it. Listing fd-directory names can succeed under the root-read policy; following those links and accessing the control endpoint remain denied. Changing the transport-looking environment variable inside the target does not change accepted policy.
 
-## Backend and packaging boundaries
+## Landlock boundary
 
 Explicit Landlock is a different user-selected backend with native direct-exec semantics. The tested kernel allowed same-user host signalling in that mode. It must not substitute for bubblewrap when process isolation or descendant retirement is required. The runner rejects private storage, caller-death observation, retirement SIGTERM, an explicit cleanup deadline, and managed proxy routing with Landlock. Native rejection of restricted-read policies is preserved. Restricted filesystem policies also require the native truncate capability (Landlock ABI 3 or later); older best-effort enforcement would leave file truncation unrestricted. The tested host provides ABI 4. Native device-ioctl restrictions depend on ABI 5 and are not part of this backend's portable contract.
 
-The downstream package builds and strips its bundled helper first, embeds that exact helper digest in the runner, and verifies the selected bundled executable through the same open descriptor used for exec. A suitable trusted host helper retains native precedence. An unused missing or modified bundled helper does not prevent host-helper execution; a selected modified helper fails verification without fallback.
+Helper selection, verification, and static/GNU packaging are described in [README.md](README.md#build-and-validation).

@@ -76,17 +76,19 @@ Neither caller transport accepts later control messages or emits acknowledgments
 | `linux_backend`                    | Linux only: `"bubblewrap"` (default) or explicit `"landlock"`. Landlock uses direct-exec semantics and rejects supervised-lifetime and managed-proxy requests; see [Linux compatibility](LINUX_COMPATIBILITY.md). |
 | `lifecycle`                        | Optional object described in [LIFECYCLE.md](LIFECYCLE.md): parent observation, signal behavior, private storage, and cleanup deadline.                                                                            |
 
-The wrapper rejects unknown top-level fields. Nested upstream types retain the release's own serialization and validation rules. Version 2 requires UTF-8 command arguments, paths, and environment values; OS strings with other byte encodings are outside this protocol. Native argument and environment size and NUL restrictions still apply.
+The wrapper rejects unknown top-level fields. Nested upstream types retain the release's own serialization and validation rules. Version 2 requires UTF-8 command arguments, paths, and environment values; OS strings with other byte encodings are outside this protocol. Native argument and environment size and NUL restrictions still apply. Filesystem policy must allow the executable and its runtime files. For example, append this entry to `filesystem.entries` to grant a writable directory:
+
+```json
+{ "path": { "type": "path", "path": "/absolute/workspace" }, "access": "write" }
+```
 
 `macos_seatbelt_profile_extension` is trusted caller configuration. The native stage applies the upstream profile, parameters, and appended SBPL together using `sandbox_init_with_parameters`, then restores signals and execs the target. Invalid SBPL fails before the target starts.
 
 The extension can grant permissions as well as restrict them. The native sandbox executable does not parse it or validate it as deny-only; the caller owns its interaction with the native filesystem, network, and platform rules. Do not populate this field from untrusted target input. The native sandbox executable contains no application-specific rules.
 
-For example, append this entry to grant one writable directory:
+Without an extension, the ordinary macOS profile retains its native sysctl, Mach-service, terminal, and filesystem restrictions. Applications needing other permissions must supply their own compatibility rules.
 
-```json
-{ "path": { "type": "path", "path": "/absolute/workspace" }, "access": "write" }
-```
+## Network and target environment
 
 A managed proxy configuration uses the release's existing camelCase wire type:
 
@@ -104,7 +106,23 @@ A managed proxy configuration uses the release's existing camelCase wire type:
 }
 ```
 
-`mode` is the upstream `"full"` or `"limited"` mode. Domain and Unix-socket permissions use the upstream map types. The native sandbox executable starts the native managed proxy, obtains its sandbox context and target environment, and asks the default sandbox manager to enforce that context. The separate `network` field is never collapsed into a proxy-selection enum.
+`mode` is the upstream `"full"` or `"limited"` mode. `RemoteNetworkProxyConfig` is the release's executor-local projection of `NetworkProxyConfig`, preserving domain and Unix-socket permission types and local-binding controls. It uses ephemeral loopback listeners and carries no MITM, credential injection, hooks, fixed listener addresses, or control service. The native sandbox enforces the resulting proxy context; `network` remains a separate permission. Proxy protocols and local-network exceptions come from the release; the runner adds no UDP routing or approval service.
+
+Native platform or target initialization may add environment values: some macOS toolchains set `__CF_USER_TEXT_ENCODING` before target `main`, and Linux bubblewrap sets `PWD` to the command directory. When a proxy is present, upstream adds or replaces these target variables:
+
+| Target-visible variables                                                                                                                                                                                                                      | Native proxy value                                                                                                               |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `HTTP_PROXY`, `HTTPS_PROXY`, `http_proxy`, `https_proxy`, `YARN_HTTP_PROXY`, `YARN_HTTPS_PROXY`, `npm_config_http_proxy`, `npm_config_https_proxy`, `npm_config_proxy`, `NPM_CONFIG_HTTP_PROXY`, `NPM_CONFIG_HTTPS_PROXY`, `NPM_CONFIG_PROXY` | Managed HTTP endpoint.                                                                                                           |
+| `BUNDLE_HTTP_PROXY`, `BUNDLE_HTTPS_PROXY`, `PIP_PROXY`, `DOCKER_HTTP_PROXY`, `DOCKER_HTTPS_PROXY`, `WS_PROXY`, `WSS_PROXY`, `ws_proxy`, `wss_proxy`                                                                                           | Managed HTTP endpoint.                                                                                                           |
+| `ALL_PROXY`, `all_proxy`, `FTP_PROXY`, `ftp_proxy`                                                                                                                                                                                            | Managed `socks5h` endpoint when SOCKS is enabled; otherwise HTTP.                                                                |
+| `NO_PROXY`, `no_proxy`, `npm_config_noproxy`, `NPM_CONFIG_NOPROXY`, `YARN_NO_PROXY`, `BUNDLE_NO_PROXY`                                                                                                                                        | Empty when local binding is disabled; otherwise `localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16`.               |
+| `CODEX_NETWORK_PROXY_ACTIVE`, `CODEX_NETWORK_ALLOW_LOCAL_BINDING`                                                                                                                                                                             | `1` for proxy active; `1` or `0` for the supplied local-binding policy.                                                          |
+| `ELECTRON_GET_USE_PROXY`, `NODE_USE_ENV_PROXY`                                                                                                                                                                                                | `true` and `1`, respectively.                                                                                                    |
+| `GIT_SSH_COMMAND` on macOS with SOCKS enabled                                                                                                                                                                                                 | `CODEX_PROXY_GIT_SSH_COMMAND=1 ssh -o ProxyCommand='nc -X 5 -x <SOCKS address> %h %p'`. An existing custom command is preserved. |
+
+Linux rewrites endpoint ports for the target network namespace. This executor-local path adds no CA, credential, or attribution variables and removes stale `CODEX_NETWORK_PROXY_CREDENTIAL_BROKER_ACTIVE`, `CODEX_NETWORK_PROXY_BROKERED_CREDENTIALS`, and `CODEX_NETWORK_PROXY_ATTRIBUTION_TOKEN` values. The upstream [environment projection](../network-proxy/src/proxy.rs) defines the complete behavior.
+
+Without a managed proxy, Linux restricted networking permits Unix socket pairs and descriptor `read`/`write`, but denies `sendto`, `shutdown`, `getsockname`, `getpeername`, `getsockopt`, and `setsockopt`, including on local pairs. Connecting, binding, listening, and creating IP sockets remain denied. Creating a local pair therefore does not establish that socket-specific I/O methods work. Application sidebands must use permitted descriptor I/O with explicit cancellation, or pipes with independently owned directions. The [historical sideband handoff](https://github.com/t-kalinowski/codex/blob/29b89360756250c94c81005e8902ab8882a8404d/codex-rs/mcp-console-sandbox/MCP_CONSOLE_HANDOFF.md) records the downstream design and acceptance criteria at its original revision; it is not a current task list.
 
 ## Caller example
 
