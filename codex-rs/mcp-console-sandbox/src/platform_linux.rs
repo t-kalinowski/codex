@@ -111,7 +111,8 @@ pub fn receive_ready(stream: &mut UnixStream, _: i32) -> io::Result<Option<Targe
     message.msg_iov = &mut vector;
     message.msg_iovlen = 1;
     message.msg_control = control.as_mut_ptr().cast();
-    message.msg_controllen = std::mem::size_of_val(&control);
+    // musl uses socklen_t here; glibc uses size_t. The fixed buffer fits both.
+    message.msg_controllen = std::mem::size_of_val(&control) as _;
     let count = unsafe { libc::recvmsg(stream.as_raw_fd(), &mut message, libc::MSG_DONTWAIT) };
     if count < 0 {
         let error = io::Error::last_os_error();
@@ -131,7 +132,7 @@ pub fn receive_ready(stream: &mut UnixStream, _: i32) -> io::Result<Option<Targe
         || unsafe {
             (*header).cmsg_level != libc::SOL_SOCKET
                 || (*header).cmsg_type != libc::SCM_CREDENTIALS
-                || (*header).cmsg_len
+                || (*header).cmsg_len as usize
                     != libc::CMSG_LEN(std::mem::size_of::<libc::ucred>() as u32) as usize
         }
     {

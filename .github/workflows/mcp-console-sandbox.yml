@@ -10,6 +10,69 @@ permissions:
   contents: read
 
 jobs:
+  linux-release:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: codex-rs
+        shell: bash
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          targets: ${{ matrix.target }}
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.14.0
+      - name: Prepare the pinned release toolchain
+        env:
+          TARGET: ${{ matrix.target }}
+          GITHUB_ENV: ${{ runner.temp }}/sandbox-musl.env
+        run: |
+          bash ../.github/scripts/install-musl-build-tools.sh
+          echo 'AWS_LC_SYS_NO_JITTER_ENTROPY=1' >> "$GITHUB_ENV"
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Build and hash the release helper
+        run: |
+          while IFS= read -r setting; do export "${setting?}"; done < '${{ runner.temp }}/sandbox-musl.env'
+          cargo build --locked --release --target '${{ matrix.target }}' -p codex-bwrap --bin bwrap
+          helper='target/${{ matrix.target }}/release/bwrap'
+          strip --strip-debug --strip-unneeded "$helper"
+          echo "CODEX_BWRAP_SHA256=$(sha256sum "$helper" | cut -d' ' -f1)" >> "$GITHUB_ENV"
+      - name: Build and inspect the standalone artifacts
+        run: |
+          while IFS= read -r setting; do export "${setting?}"; done < '${{ runner.temp }}/sandbox-musl.env'
+          cargo build --locked --release --target '${{ matrix.target }}' -p codex-mcp-console-sandbox --bin mcp-console-sandbox
+          python3 - <<'PY'
+          import subprocess
+          from pathlib import Path
+          for name in ('mcp-console-sandbox', 'bwrap'):
+              binary = Path('target/${{ matrix.target }}/release') / name
+              report = subprocess.check_output(['readelf', '-W', '-l', '-d', '-V', binary], text=True)
+              print(report)
+              assert 'INTERP' not in report and '(NEEDED)' not in report and 'Name:' not in report
+          PY
+      - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
+        with:
+          tool: nextest@0.9.103
+      - name: Exercise release transport and lifecycle contracts
+        # These public contracts do not inject a glibc LD_PRELOAD library into
+        # the runner. Fault-injection suites remain in the GNU job below.
+        run: |
+          env "CARGO_BIN_EXE_mcp-console-sandbox=$PWD/target/${{ matrix.target }}/release/mcp-console-sandbox" \
+            "CARGO_BIN_EXE_bwrap=$PWD/target/${{ matrix.target }}/release/bwrap" \
+            just test --locked -p codex-mcp-console-sandbox --retries 0 \
+              -E 'test(transport::) | test(lifecycle::)'
+
   contract:
     runs-on: macos-14
     timeout-minutes: 45

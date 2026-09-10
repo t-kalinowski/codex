@@ -45,6 +45,12 @@ The fixture binary is only a test target. It is not a runtime companion.
 
 ## Build and validation
 
+Portable Linux release pairs use `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`, matching the pinned release's [target matrix and build recipe](../../.github/workflows/rust-release.yml). Reuse [install-musl-build-tools.sh](../../.github/scripts/install-musl-build-tools.sh) with the selected `TARGET` and a `GITHUB_ENV` output file; apply that file's environment to the musl builds only. The recipe builds the pinned musl libcap archive, uses Zig 0.14.0 for native dependencies and musl GCC for Rust linking, and disables aws-lc jitter entropy in the release workflow. The standalone package enables the same vendored OpenSSL feature as the release binaries without relying on `codex-core` feature unification.
+
+Build and strip `bwrap` first, export its SHA-256 as `CODEX_BWRAP_SHA256`, then build the runner with the same target and `--locked --release`. Inspect both files with `readelf -W -l -d -V`: portable pairs must have no interpreter, `NEEDED` libraries, or symbol-version requirements. The release-artifact CI job builds both architectures and runs the existing transport and lifecycle contracts with the resulting pair. GNU fault-injection tests remain separate because their loader interposers cannot instrument a static executable.
+
+These static artifacts do not require host libcap or OpenSSL runtime libraries. Their target command still needs its own interpreter, libraries, and compatible libc. This build property does not establish portability of an embedding application's R, Python, or SQL runtime.
+
 Use the release's Rust 1.95.0 toolchain, workspace dependencies, and lockfile. On Linux, building the ordinary bundled bubblewrap requires a C toolchain, `pkg-config`, and libcap development headers and libraries. On Ubuntu, install these with:
 
 ```console

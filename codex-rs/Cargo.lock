@@ -3623,6 +3623,7 @@ dependencies = [
  "codex-utils-cargo-bin",
  "codex-utils-path-uri",
  "libc",
+ "openssl-sys",
  "pretty_assertions",
  "serde",
  "serde_json",

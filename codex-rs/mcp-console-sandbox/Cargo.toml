@@ -35,6 +35,17 @@ tokio = { workspace = true, features = ["macros", "rt", "time"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 codex-linux-sandbox = { workspace = true }
 
+# Match the release binaries' native linkage without depending on codex-core
+# to enable this feature through Cargo's workspace feature unification.
+[target.x86_64-unknown-linux-musl.dependencies]
+openssl-sys = { workspace = true, features = ["vendored"] }
+
+[target.aarch64-unknown-linux-musl.dependencies]
+openssl-sys = { workspace = true, features = ["vendored"] }
+
+[package.metadata.cargo-shear]
+ignored = ["openssl-sys"]
+
 [dev-dependencies]
 codex-utils-cargo-bin = { workspace = true }
 pretty_assertions = { workspace = true }
