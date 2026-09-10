@@ -63,7 +63,7 @@ jobs:
           PY
       - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
         with:
-          tool: nextest@0.9.103
+          tool: nextest@0.9.103,just@1.51.0
       - name: Exercise release transport and lifecycle contracts
         # These public contracts do not inject a glibc LD_PRELOAD library into
         # the runner. Fault-injection suites remain in the GNU job below.
