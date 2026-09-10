@@ -36,10 +36,10 @@ jobs:
       - name: Prepare the pinned release toolchain
         env:
           TARGET: ${{ matrix.target }}
-          GITHUB_ENV: ${{ runner.temp }}/sandbox-musl.env
         run: |
-          bash ../.github/scripts/install-musl-build-tools.sh
-          echo 'AWS_LC_SYS_NO_JITTER_ENTROPY=1' >> "$GITHUB_ENV"
+          GITHUB_ENV='${{ runner.temp }}/sandbox-musl.env' \
+            bash ../.github/scripts/install-musl-build-tools.sh
+          echo 'AWS_LC_SYS_NO_JITTER_ENTROPY=1' >> '${{ runner.temp }}/sandbox-musl.env'
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Build and hash the release helper
         run: |
