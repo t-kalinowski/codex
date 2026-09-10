@@ -2,9 +2,9 @@
 
 `mcp-console-sandbox` extracts the native sandbox in this Codex release into a standalone executable. Start it with `--config-env NAME -- command [args...]`, or send one large request through `--bootstrap-fd <N>`. Leave the target's original stdin attached from process creation. The requested command is an opaque process with inherited stdin, stdout, and stderr. Version 2 requires UTF-8 arguments, paths, and environment values.
 
-The executable boundary is the integration contract. Callers do not link to or call Codex Rust crates. Inside the executable, the upstream filesystem and network policies, managed proxy, and ordinary `SandboxManager` prepare the native sandbox. A trusted caller can supply additional macOS Seatbelt rules through the optional `macos_seatbelt_profile_extension` bootstrap field. The private `src/codex.rs` facade contains every upstream import; `src/bootstrap.rs` contains the small local wire wrapper.
+The executable boundary is the integration contract. Callers do not link to or call Codex Rust crates. Inside the executable, the upstream filesystem and network policies, managed proxy, and ordinary `SandboxManager` prepare the native sandbox. A trusted caller can supply additional macOS Seatbelt rules through the optional `macos_seatbelt_profile_extension` bootstrap field. The private `src/codex.rs` facade centralizes upstream policy and orchestration dependencies; `src/bootstrap.rs` contains the local wire wrapper.
 
-One application supervisor validates owned configuration, establishes descendant observation, configures the native sandbox and optional proxy, and releases the target through a private execution gate. It retires descendants before removing optional private storage and reporting completion. Parent-death retirement and SIGTERM retirement are explicit options; application restart and recovery remain caller responsibilities. The application uses ordinary process lifecycle and standard streams; the native namespace init retains a private runner control channel that never reaches the target.
+Default execution uses one application supervisor to validate owned configuration, establish platform lifetime tracking, configure the native sandbox and optional proxy, and release the target through a private execution gate. It retires descendants before removing optional private storage and reporting completion. Parent-death retirement and SIGTERM retirement are explicit options; application restart is outside the runner contract. The application uses ordinary process lifecycle and standard streams; the native namespace init retains a private runner control channel that never reaches the target. Explicit Linux Landlock execution has no waiting supervisor.
 
 See [What this patch set adds to the native sandbox](CAPABILITIES.md) for the complete inventory of added capabilities, additional restrictions, compatibility changes, and reused upstream behavior.
 
@@ -31,7 +31,7 @@ On macOS, `macos_seatbelt_profile_extension` appends trusted caller-supplied SBP
 
 ## Platforms and packaging
 
-Linux and macOS are supported and have separate jobs in the focused workflow. Both use the release's native sandbox behavior. See [REBASE.md](REBASE.md) for platform validation environments and results. Windows compatibility remains outside scope.
+Linux and macOS are supported and have separate jobs in the focused workflow. Both use the release's native sandbox behavior. [REBASE.md](REBASE.md#historical-validation-records) links revision-specific platform results and their limitations. Windows compatibility remains outside scope.
 
 | Platform                    | Behavior                                                                                                                         |
 | --------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
@@ -82,7 +82,7 @@ env "CARGO_BIN_EXE_bwrap=$sandbox_target_dir/debug/bwrap" \
   just test -p codex-mcp-console-sandbox --retries 0
 ```
 
-The Bazel equivalent is `bazel test //codex-rs/mcp-console-sandbox:bootstrap-contract-test`; its test data supplies the runner, fixture, and ordinary bundled helper. The focused Linux CI job also runs the native sandbox suites and the entire executable suite against the release runner and release bubblewrap. The macOS job retains its existing coverage and two native test exclusions. [REBASE.md](REBASE.md) records local results, complete validation commands, and the rolling patch audit. Hosted CI results are separate from local validation.
+The Bazel equivalent is `bazel test //codex-rs/mcp-console-sandbox:bootstrap-contract-test`; its test data supplies the runner, fixture, and ordinary bundled helper. The focused Linux CI job also runs the native sandbox suites and the entire executable suite against the release runner and release bubblewrap. The macOS job retains its existing coverage and two native test exclusions. [REBASE.md](REBASE.md) owns the upgrade procedure and validation checklist; [INTEGRATION.md](INTEGRATION.md) owns the current integration inventory. Hosted CI results are separate from local validation.
 
 ## Runtime telemetry and network
 
@@ -92,7 +92,7 @@ With network denied (`"restricted"`) and no proxy, the runner itself performs no
 
 The bootstrap uses upstream `RemoteNetworkProxyConfig`, the release's existing executor-local projection of `NetworkProxyConfig`. This directly preserves its network mode, domain and Unix-socket permission types, and local-binding controls. It chooses ephemeral loopback listeners and carries no MITM, credential injection, hooks, fixed listener addresses, or control service. The sandbox network permission remains a separate upstream field. A supplied proxy is enforced through the native sandbox projection.
 
-The explicit environment map replaces the runner's environment for the target. Native platform or target-runtime initialization may add variables; for example, some macOS toolchains set `__CF_USER_TEXT_ENCODING` before target `main`, and Linux bubblewrap sets `PWD` to the command working directory. When a proxy is present, the upstream proxy adds or replaces these variables:
+Descriptor mode supplies a complete target environment map; environment mode inherits launch values by default and accepts optional overrides. See [PROTOCOL.md](PROTOCOL.md) for the acceptance-time integrity boundaries. Native platform or target-runtime initialization may add variables; for example, some macOS toolchains set `__CF_USER_TEXT_ENCODING` before target `main`, and Linux bubblewrap sets `PWD` to the command working directory. When a proxy is present, the upstream proxy adds or replaces these variables:
 
 | Target-visible variables                                                                                                                                                            | Native proxy value                                                                                                                   |
 | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
@@ -126,6 +126,6 @@ There is no automatic legacy-Landlock or unsandboxed fallback. Filesystem polici
 
 Without a caller-supplied extension, the ordinary macOS profile retains its existing sysctl, Mach-service, terminal, and filesystem restrictions. Applications may need caller-owned compatibility rules for operations outside those native permissions.
 
-Proxy protocol support and local-network exceptions are those of the release; the runner adds no UDP routing or approval service. There is no watchdog or custom recovery after the supervisor crashes or receives SIGKILL. Surviving workloads retain native restrictions, but descendant retirement, private-storage cleanup, and terminal restoration are then not guaranteed. Darwin retirement covers observed process identities; see [LIFECYCLE.md](LIFECYCLE.md) for that boundary and other limits.
+Proxy protocol support and local-network exceptions are those of the release; the runner adds no UDP routing or approval service. There is no watchdog or custom recovery after the supervisor crashes or receives SIGKILL. Linux's native death chain can terminate workloads after readiness, with earlier setup windows outside that guarantee. macOS does not guarantee termination after runner loss. Neither platform promises private-storage deletion or terminal restoration after runner death. See [LIFECYCLE.md](LIFECYCLE.md) for these limits and Darwin's observation boundary.
 
 See the [handoff notes](PROTOCOL.md#downstream-handoff) and [upstream integration note](INTEGRATION.md).

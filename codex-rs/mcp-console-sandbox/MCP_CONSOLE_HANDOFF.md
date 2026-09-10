@@ -1,10 +1,10 @@
-# MCP Console handoff: sideband I/O with upstream Linux restrictions
+# Historical MCP Console handoff: sideband I/O
 
-For PR #266, use the newer implementation pin and validation record in [PR266.md](PR266.md). The sideband work below remains a separate Console task; this runner work does not change Console production code or tests.
+This records the sideband migration proposed against MCP Console main `c3027d71a86f837804ff3234dd1fab5c9103ff40`. Paths, symbols, and test references below refer to that revision. It is historical design context, not a current downstream task list or pin recommendation. [PR266.md](PR266.md) records the subsequent fixes at their original revisions. Current runner integration and reapplication instructions are in [INTEGRATION.md](INTEGRATION.md) and [REBASE.md](REBASE.md).
 
-Update MCP Console to use the standalone supervisor and make its relay-to-worker sideband work under the pinned upstream Linux network policy. The runner's socket-operation relaxation has been removed. Keep that policy unchanged during integration.
+The proposal was to adopt the standalone supervisor and adapt the relay-to-worker sideband to the unchanged upstream Linux network policy. The runner's earlier socket-operation relaxation was removed by `270b25515f305d30f5889d815014cd4756d12f5a`.
 
-Reference checkout: MCP Console main `c3027d71a86f837804ff3234dd1fab5c9103ff40`. At that revision, `sandbox-runner.json` pins `3ee7d3190983b482b312ddfc3201c464179a1245`, protocol 2. Adopt runner commit `270b25515f305d30f5889d815014cd4756d12f5a` from `t-kalinowski/codex`, branch `mcp-console/sandbox-runner/rust-v0.150.1`, keeping protocol 2 and rebuilding the staged artifacts. This note specifies work in MCP Console; no Console source, tests, or snapshots were changed while preparing it.
+The reference checkout's `sandbox-runner.json` pinned `3ee7d3190983b482b312ddfc3201c464179a1245`, protocol 2. No Console source, tests, or snapshots were changed while preparing this handoff.
 
 ## Why a local socket encounters the sandbox
 
@@ -14,7 +14,7 @@ The upstream restricted-network seccomp filter checks syscall numbers and argume
 
 The pinned filter permits `socketpair(AF_UNIX)` and ordinary descriptor `read`/`write`, but denies `sendto`, `shutdown`, `getsockname`, `getpeername`, `getsockopt`, and `setsockopt`. Rust's Linux `UnixStream::write` uses `send`/`sendto`; creating the pair successfully therefore does not establish that every socket method is usable. These statements concern restricted networking without a managed proxy; the upstream proxy mode has its own rules.
 
-The standalone runner retains a socket for its short startup exchange. The gated native endpoint uses `File` read/write on the owned socket descriptor. The host supervisor sets `SO_PASSCRED` before launch and receives kernel-supplied sender credentials, so process identification still works. That exchange ends before target execution and does not have the long-lived sideband's cancellation requirements.
+The current runner's native endpoint uses `File` read/write on its owned socket descriptor. The host supervisor sets `SO_PASSCRED` before launch and receives kernel-supplied sender credentials. Linux namespace init retains that endpoint for signals and retirement after setup; the workload never inherits it. This internal control channel and the application's sideband have separate ownership and cancellation contracts; see [INTEGRATION.md](INTEGRATION.md#procfs-control-and-lifetime-review).
 
 ## Sideband work
 
@@ -37,16 +37,11 @@ The previous socket design reduced descriptor bookkeeping and allowed `shutdown(
 
 A socket using permitted descriptor I/O and explicit cancellation could also satisfy the policy. The decision is about ownership and cancellation complexity, not whether a local socket is intrinsically incompatible with sandboxing. Do not preserve the old success test by enabling networking, adding a proxy, moving the relay outside the sandbox, or restoring syscall allowances.
 
-## Runner integration
+## Runner integration reference
 
-Update `sandbox-runner.json` and restage through `scripts/stage-sandbox-runner` using a clean checkout at the new exact pin. Keep protocol version 2. Follow [PROTOCOL.md](PROTOCOL.md) and [LIFECYCLE.md](LIFECYCLE.md):
+At the reference revision, `src/sandbox/runner.rs`, platform launchers, `src/sandbox/installation.rs`, and `scripts/stage-sandbox-runner` were the downstream integration points. The proposed adoption removed the separate manager/monitor and `sandbox-target` signal wrapper. Application session/restart logic and relay/worker framing remained downstream responsibilities.
 
-- Use `--config-env NAME -- command [args...]` for a thin exec-style frontend. JSON contains the policy and explicit lifecycle options; arguments, cwd, and ordinary target environment remain launch inputs. Keep the framed `--bootstrap-fd N` interface only where its larger request capacity is needed. Configuration is fixed at frame acceptance in that mode.
-- Express Console's existing private-directory exports, caller-death behavior, SIGTERM retirement, filesystem/network policy, and trusted macOS extension explicitly. Pass the actual direct parent's PID if using `lifecycle.parent_pid`. Do not retain an intermediate manager solely to satisfy an old PID relationship.
-- Remove the application-level sandbox manager/monitor and `sandbox-target` signal-restoration wrapper when switching to this supervisor. Keep application session/restart logic and relay/worker protocol responsibilities in Console. The native runner owns descendant retirement, private storage, terminal restoration, and proxy lifetime.
-- Treat retirement or cleanup errors as failures. The runner deliberately provides no custom cleanup recovery after its sole supervisor crashes or receives SIGKILL; surviving workloads retain native enforcement. Document that intentional difference and replace manager-specific recovery expectations with tests of retained native enforcement. Preserve public cleanup checks while the supervisor is alive.
-
-The current `src/sandbox/runner.rs`, platform launchers, and `src/sandbox/installation.rs` are the main integration points. Keep sideband compatibility work separate from unrelated runtime or transcript changes.
+Use the current [protocol handoff](PROTOCOL.md#downstream-handoff) for both configuration transports and caller responsibilities, and [LIFECYCLE.md](LIFECYCLE.md) for retirement and supervisor-loss limits. A historical pin or recovery test here must not override those contracts.
 
 ## Acceptance criteria
 

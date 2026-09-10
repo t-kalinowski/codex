@@ -1,6 +1,6 @@
 # Bootstrap protocol version 2
 
-Two explicit input modes are supported. Both accept one immutable configuration and use the same supervisor.
+Two explicit input modes are supported. Both accept one immutable configuration and select the same native execution paths. Default execution uses the runner's supervisor; explicit Linux Landlock execution has no waiting supervisor, as described below.
 
 ## Environment configuration
 
@@ -37,7 +37,7 @@ The bootstrap descriptor is closed after parsing and validation, before runtime,
 
 Stdin, stdout, and stderr are attached directly. The target inherits stdin's original open file description, including its offset, seekability, terminal identity, and binary contents. This executable drops its owned stdin from the launch command immediately after spawning, before waiting for the child. Rust startup supplies `/dev/null` when stdin was closed at invocation, matching the existing runtime behavior.
 
-There are no later control messages or acknowledgments. No protocol output is written to stdout. Native launch failures and target exits retain the native status; signals map to `128 + signal`. Native Linux helper invocations beginning with `--sandbox-policy-cwd` dispatch separately, including upstream compatibility re-execs; they do not take or reread a bootstrap.
+Neither caller transport accepts later control messages or emits acknowledgments. No protocol output is written to stdout. Native launch failures and target exits retain the native status; signals map to `128 + signal`. Native Linux helper invocations beginning with `--target-setup-fd` or `--sandbox-policy-cwd` dispatch separately, including upstream compatibility re-execs; they do not take or reread a bootstrap. Linux's internal control channel is described at the end of this document.
 
 ## Request
 
