@@ -148,7 +148,6 @@ fn owned_loss(loss: Loss) {
             let native = runner(directory.path());
             let mut request = fixture("lifecycle", &["detached"]);
             request["cwd"] = json!(directory.path());
-            request["environment"]["PATH"] = json!(path);
             request["proxy"] = proxy;
             request["filesystem"]["entries"]
                 .as_array_mut()
@@ -162,6 +161,8 @@ fn owned_loss(loss: Loss) {
             command
                 .arg("owner")
                 .arg(native.get_program())
+                // Helper selection uses the launch environment, before target setup.
+                .env("PATH", &path)
                 .env("SANDBOX_TEST_REQUEST", request.to_string())
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
