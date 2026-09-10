@@ -1,3 +1,4 @@
+use anyhow::Context;
 use anyhow::Result;
 use std::io::Read;
 use std::io::Write;
@@ -44,11 +45,14 @@ pub fn run(runner: String, library: String, forbidden: String) -> Result<()> {
     assert_eq!(i32::from_ne_bytes(event), child.id() as i32);
     let mut value: serde_json::Value =
         serde_json::from_str(&std::env::var("SANDBOX_TEST_CONFIG")?)?;
+    let directory = std::path::Path::new(&forbidden)
+        .parent()
+        .context("fixture write probe must have a parent directory")?;
     value["filesystem"]["entries"]
         .as_array_mut()
-        .unwrap()
+        .context("fixture policy must contain filesystem entries")?
         .push(serde_json::json!({
-            "path": {"type": "path", "path": std::path::Path::new(&forbidden).parent().unwrap()},
+            "path": {"type": "path", "path": directory},
             "access": "write"
         }));
     value["network"] = serde_json::json!("enabled");
