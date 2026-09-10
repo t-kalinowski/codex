@@ -173,6 +173,11 @@ INTERPOSE(observed_kill, kill)
 INTERPOSE(observed_unlinkat, unlinkat)
 INTERPOSE(observed_children, proc_listchildpids)
 #else
+int waitid(idtype_t type, id_t pid, siginfo_t *info, int options) {
+    int (*real)(idtype_t, id_t, siginfo_t *, int) = NEXT(waitid);
+    if (getenv("SANDBOX_TEST_FAIL_WAIT")) { errno = EIO; return -1; }
+    return real(type, pid, info, options);
+}
 pid_t fork(void) { return observed_fork(); }
 int setpgid(pid_t pid, pid_t group) { return observed_setpgid(pid, group); }
 ssize_t send(int fd, const void *buffer, size_t size, int flags) { return observed_send(fd, buffer, size, flags); }

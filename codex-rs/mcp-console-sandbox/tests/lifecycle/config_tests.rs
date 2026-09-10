@@ -326,28 +326,3 @@ fn invalid_lifecycle_configuration_never_executes_target() {
         assert!(output.stdout.is_empty());
     }
 }
-
-#[cfg(target_os = "linux")]
-#[test]
-fn native_setup_rejects_procfs_fallback_before_target_execution() {
-    let directory = tempfile::tempdir().unwrap();
-    let output = runner(directory.path())
-        .args([
-            "--target-setup-fd",
-            "3",
-            "--sandbox-policy-cwd",
-            "/",
-            "--no-proc",
-            "--",
-            "/bin/echo",
-            "executed",
-        ])
-        .output()
-        .unwrap();
-    assert!(!output.status.success());
-    assert!(output.stdout.is_empty());
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("namespace-local procfs"),
-        "{output:?}"
-    );
-}

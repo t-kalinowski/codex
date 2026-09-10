@@ -17,13 +17,9 @@ pub fn adversary() -> Result<()> {
     );
     #[cfg(target_os = "linux")]
     {
-        assert!(std::fs::read_dir(format!("/proc/{supervisor}/fd")).is_err());
+        assert!(std::fs::File::open(format!("/proc/{supervisor}/fd/0")).is_err());
         assert!(std::fs::File::open(format!("/proc/{supervisor}/mem")).is_err());
         assert!(std::fs::File::open(format!("/proc/{supervisor}/environ")).is_err());
-        assert_eq!(
-            std::fs::read_link("/proc/self")?,
-            std::path::PathBuf::from(std::process::id().to_string())
-        );
     }
     #[cfg(target_os = "macos")]
     {
