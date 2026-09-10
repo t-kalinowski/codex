@@ -1,0 +1,131 @@
+# Standalone native sandbox executable
+
+`mcp-console-sandbox` extracts the native sandbox in this Codex release into a standalone executable. Start it with `--config-env NAME -- command [args...]`, or send one large request through `--bootstrap-fd <N>`. Leave the target's original stdin attached from process creation. The requested command is an opaque process with inherited stdin, stdout, and stderr. Version 2 requires UTF-8 arguments, paths, and environment values.
+
+The executable boundary is the integration contract. Callers do not link to or call Codex Rust crates. Inside the executable, the upstream filesystem and network policies, managed proxy, and ordinary `SandboxManager` prepare the native sandbox. A trusted caller can supply additional macOS Seatbelt rules through the optional `macos_seatbelt_profile_extension` bootstrap field. The private `src/codex.rs` facade centralizes upstream policy and orchestration dependencies; `src/bootstrap.rs` contains the local wire wrapper.
+
+Default execution uses one application supervisor to validate owned configuration, establish platform lifetime tracking, configure the native sandbox and optional proxy, and release the target through a private execution gate. It retires descendants before removing optional private storage and reporting completion. Parent-death retirement and SIGTERM retirement are explicit options; application restart is outside the runner contract. The application uses ordinary process lifecycle and standard streams; the native namespace init retains a private runner control channel that never reaches the target. Explicit Linux Landlock execution has no waiting supervisor.
+
+See [What this patch set adds to the native sandbox](CAPABILITIES.md) for the complete inventory of added capabilities, additional restrictions, compatibility changes, and reused upstream behavior.
+
+## Invocation
+
+For an exec-style frontend, put JSON in one explicitly selected child environment variable:
+
+```sh
+SANDBOX_CONFIG='{"version":2,"filesystem":{"kind":"restricted","entries":[{"path":{"type":"special","value":{"kind":"root"}},"access":"read"}]},"network":"restricted","lifecycle":{"private_tmp":{"environment":["TMPDIR"]}}}' \
+  mcp-console-sandbox --config-env SANDBOX_CONFIG -- /bin/cat
+```
+
+Arguments, cwd, and ordinary environment variables stay normal launch inputs. The selected transport is consumed once and excluded from target setup. There are no configuration files, automatic fallbacks, or later policy changes.
+
+The private invocation is `mcp-console-sandbox --bootstrap-fd <N>`, where N is an open, readable inherited descriptor greater than 2. The launcher normally supplies the read end of an anonymous pipe and retains the writer. Start the executable before writing the four-byte unsigned big-endian length and JSON payload, which may be up to 1 MiB. A complete valid frame releases startup without waiting for EOF; closing the writer before completing the frame cancels startup.
+
+This is a breaking change to private protocol version 2. The no-argument invocation is rejected. In descriptor mode, configuration is read exclusively from the bootstrap descriptor, which is closed before native setup. There is no descriptor transfer after process creation. Target stdin keeps its original open file description; the waiting executable releases its input copy after spawning the child. On Linux, the native helpers transfer that description through an extra inherited descriptor and release their input copies, so target-side closure is visible to the caller while the target is still running.
+
+Stdout and stderr belong to the target. Configuration or launch failures use stderr and a nonzero exit. A completed native launch returns its exit code; a signal death maps to `128 + signal`, matching the native CLI. The [lifecycle contract](LIFECYCLE.md) defines signal handling, retirement, terminal ownership, and failure reporting.
+
+See [PROTOCOL.md](PROTOCOL.md) for the complete request and a runnable caller.
+
+On macOS, `macos_seatbelt_profile_extension` appends trusted caller-supplied SBPL to the native profile in the same sandbox launch. It can grant permissions as well as restrict them; the runner does not validate it as deny-only. Omit the field or use `null` to preserve the native profile. Linux rejects a supplied string. The caller owns these rules; no application-specific profile is built into the runner.
+
+## Platforms and packaging
+
+Linux and macOS are supported and have separate jobs in the focused workflow. Both use the release's native sandbox behavior. [REBASE.md](REBASE.md#historical-validation-records) links revision-specific platform results and their limitations. Windows compatibility remains outside scope.
+
+| Platform                    | Behavior                                                                                                                         |
+| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| macOS                       | The ordinary process Seatbelt profile, applied in a native stage that execs the target.                                          |
+| Linux                       | The existing Linux helper, bubblewrap, seccomp, and native proxy routing. The executable dispatches its own native helper stage. |
+| Windows and other platforms | The executable reports unsupported on stderr and exits 1; no target is launched. No Windows compatibility guarantee is made.     |
+
+Linux uses a suitable host `bwrap` from the trusted launch environment's `PATH` first, then the ordinary bundled helper search. One supported bundled layout places `bwrap` beside the runner. The existing `codex-resources` and install-context locations remain available. There is no runner-specific adjacent-helper check, patched bubblewrap option, or static-libcap requirement. Native bundled-helper verification accepts a build-time `CODEX_BWRAP_SHA256`; downstream packaging embeds the digest of the exact helper it ships. A selected bundled helper is hashed and executed through the same open descriptor. Host helpers retain the native trusted-PATH contract.
+
+The fixture binary is only a test target. It is not a runtime companion.
+
+## Build and validation
+
+Portable Linux release pairs use `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`, matching the pinned release's [target matrix and build recipe](../../.github/workflows/rust-release.yml). Reuse [install-musl-build-tools.sh](../../.github/scripts/install-musl-build-tools.sh) with the selected `TARGET` and a `GITHUB_ENV` output file; apply that file's environment to the musl builds only. The recipe builds the pinned musl libcap archive, uses Zig 0.14.0 for native dependencies and musl GCC for Rust linking, and disables aws-lc jitter entropy in the release workflow. The standalone package enables the same vendored OpenSSL feature as the release binaries without relying on `codex-core` feature unification.
+
+Build and strip `bwrap` first, export its SHA-256 as `CODEX_BWRAP_SHA256`, then build the runner with the same target and `--locked --release`. Inspect both files with `readelf -W -l -d -V`: portable pairs must have no interpreter, `NEEDED` libraries, or symbol-version requirements. The release-artifact CI job builds both architectures and runs the existing transport and lifecycle contracts with the resulting pair. GNU fault-injection tests remain separate because their loader interposers cannot instrument a static executable.
+
+These static artifacts do not require host libcap or OpenSSL runtime libraries. Their target command still needs its own interpreter, libraries, and compatible libc. This build property does not establish portability of an embedding application's R, Python, or SQL runtime.
+
+Use the release's Rust 1.95.0 toolchain, workspace dependencies, and lockfile. On Linux, building the ordinary bundled bubblewrap requires a C toolchain, `pkg-config`, and libcap development headers and libraries. On Ubuntu, install these with:
+
+```console
+sudo apt-get install -y build-essential pkg-config libcap-dev
+```
+
+Build the Linux release pair and resolve Cargo's actual output directory:
+
+```console
+cd codex-rs
+cargo build --locked --release \
+  -p codex-mcp-console-sandbox --bin mcp-console-sandbox \
+  -p codex-bwrap --bin bwrap
+sandbox_target_dir="$(cargo metadata --locked --format-version=1 --no-deps |
+  python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')"
+```
+
+Stage `$sandbox_target_dir/release/mcp-console-sandbox` and `$sandbox_target_dir/release/bwrap` together when supplying the fallback. The ordinary Cargo helper links to the system libcap; the destination needs its runtime library. On macOS, build only the runner with `cargo build --locked -p codex-mcp-console-sandbox --bin mcp-console-sandbox --release`.
+
+Bazel builds the executable with `bazel build //codex-rs/mcp-console-sandbox:mcp-console-sandbox`. No workspace status configuration or source-revision stamp is required.
+
+Build tools do not send application telemetry to OpenAI. Cargo, Bazel, rustup, and CI actions may download dependencies and tools when they are not cached. Once dependencies are available, a Cargo build can use `--locked --offline`.
+
+For Linux Cargo tests, build the ordinary debug helper before running the executable suite:
+
+```console
+cargo build --locked -p codex-bwrap --bin bwrap
+env "CARGO_BIN_EXE_bwrap=$sandbox_target_dir/debug/bwrap" \
+  just test -p codex-mcp-console-sandbox --retries 0
+```
+
+The Bazel equivalent is `bazel test //codex-rs/mcp-console-sandbox:bootstrap-contract-test`; its test data supplies the runner, fixture, and ordinary bundled helper. The focused Linux CI job also runs the native sandbox suites and the entire executable suite against the release runner and release bubblewrap. The macOS job retains its existing coverage and two native test exclusions. [REBASE.md](REBASE.md) owns the upgrade procedure and validation checklist; [INTEGRATION.md](INTEGRATION.md) owns the current integration inventory. Hosted CI results are separate from local validation.
+
+## Runtime telemetry and network
+
+This executable does not initialize OpenAI model clients, authentication, sessions, or an OpenTelemetry exporter. Telemetry is not enabled by default. Compiling or linking a telemetry-related transitive crate does not activate telemetry. There is therefore no runner-specific telemetry switch to disable.
+
+With network denied (`"restricted"`) and no proxy, the runner itself performs no application egress. With a managed proxy, it listens and connects as required by the supplied Codex proxy policy. With network enabled, the opaque target may make network requests. Target traffic to OpenAI is target behavior, not runner telemetry.
+
+The bootstrap uses upstream `RemoteNetworkProxyConfig`, the release's existing executor-local projection of `NetworkProxyConfig`. This directly preserves its network mode, domain and Unix-socket permission types, and local-binding controls. It chooses ephemeral loopback listeners and carries no MITM, credential injection, hooks, fixed listener addresses, or control service. The sandbox network permission remains a separate upstream field. A supplied proxy is enforced through the native sandbox projection.
+
+Descriptor mode supplies a complete target environment map; environment mode inherits launch values by default and accepts optional overrides. See [PROTOCOL.md](PROTOCOL.md) for the acceptance-time integrity boundaries. Native platform or target-runtime initialization may add variables; for example, some macOS toolchains set `__CF_USER_TEXT_ENCODING` before target `main`, and Linux bubblewrap sets `PWD` to the command working directory. When a proxy is present, the upstream proxy adds or replaces these variables:
+
+| Target-visible variables                                                                                                                                                            | Native proxy value                                                                                                                   |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `HTTP_PROXY`, `HTTPS_PROXY`, `http_proxy`, `https_proxy`                                                                                                                            | Managed HTTP endpoint.                                                                                                               |
+| `YARN_HTTP_PROXY`, `YARN_HTTPS_PROXY`, `npm_config_http_proxy`, `npm_config_https_proxy`, `npm_config_proxy`, `NPM_CONFIG_HTTP_PROXY`, `NPM_CONFIG_HTTPS_PROXY`, `NPM_CONFIG_PROXY` | Managed HTTP endpoint.                                                                                                               |
+| `BUNDLE_HTTP_PROXY`, `BUNDLE_HTTPS_PROXY`, `PIP_PROXY`, `DOCKER_HTTP_PROXY`, `DOCKER_HTTPS_PROXY`                                                                                   | Managed HTTP endpoint.                                                                                                               |
+| `WS_PROXY`, `WSS_PROXY`, `ws_proxy`, `wss_proxy`                                                                                                                                    | Managed HTTP endpoint.                                                                                                               |
+| `ALL_PROXY`, `all_proxy`, `FTP_PROXY`, `ftp_proxy`                                                                                                                                  | Managed `socks5h` endpoint when SOCKS is enabled; otherwise the HTTP endpoint.                                                       |
+| `NO_PROXY`, `no_proxy`, `npm_config_noproxy`, `NPM_CONFIG_NOPROXY`, `YARN_NO_PROXY`, `BUNDLE_NO_PROXY`                                                                              | Empty when local binding is disabled; otherwise `localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16`.                   |
+| `CODEX_NETWORK_PROXY_ACTIVE`                                                                                                                                                        | `1`.                                                                                                                                 |
+| `CODEX_NETWORK_ALLOW_LOCAL_BINDING`                                                                                                                                                 | `1` or `0`, from the supplied policy.                                                                                                |
+| `ELECTRON_GET_USE_PROXY`                                                                                                                                                            | `true`.                                                                                                                              |
+| `NODE_USE_ENV_PROXY`                                                                                                                                                                | `1`.                                                                                                                                 |
+| `GIT_SSH_COMMAND` on macOS with SOCKS enabled                                                                                                                                       | `CODEX_PROXY_GIT_SSH_COMMAND=1 ssh -o ProxyCommand='nc -X 5 -x <SOCKS address> %h %p'`. An existing custom SSH command is preserved. |
+
+Linux's native routing rewrites proxy endpoint ports for the target network namespace. No CA, credential, or attribution variables are added by this executor-local proxy path. The native proxy removes stale `CODEX_NETWORK_PROXY_CREDENTIAL_BROKER_ACTIVE`, `CODEX_NETWORK_PROXY_BROKERED_CREDENTIALS`, and `CODEX_NETWORK_PROXY_ATTRIBUTION_TOKEN` values.
+
+## Native limitations
+
+Linux bubblewrap execution requires mounted procfs, the selected helper's namespace operations, and the requested seccomp and network policy capabilities. A fresh procfs mount is optional: the native inherited-procfs path keeps user, mount, and PID isolation. Host PIDs and permitted metadata can be visible in that view; process tools that assume procfs PIDs equal namespace PIDs may not work there. The supervisor uses a known direct-child wait and native namespace retirement, without a host subreaper or process-tree enumeration. Pidfds are optional; see [Linux compatibility](LINUX_COMPATIBILITY.md) for the tested baseline and the stopped-init boundary.
+
+An explicit `linux_backend: "landlock"` selects the upstream Landlock/seccomp path with direct-exec semantics. It never provides process isolation or descendant cleanup, and rejects supervised-lifetime options, managed proxy routing, and policies the native backend cannot represent. It is never an automatic fallback.
+
+```console
+unshare --user --map-root-user --mount --net --pid --fork true
+```
+
+Ubuntu's AppArmor restrictions can block unprivileged namespace setup even when `kernel.unprivileged_userns_clone=1` and `user.max_user_namespaces` is nonzero. Errors such as `setting up uid map: Permission denied` or `loopback: Failed RTM_NEWADDR: Operation not permitted` can reflect that host restriction. The repository's shared Linux CI setup enables user namespaces and removes that restriction on its CI runner. Containers also need permission to perform native namespace operations.
+
+There is no automatic legacy-Landlock or unsandboxed fallback. Filesystem policies must allow the executable and runtime files needed by the native sandbox path. Linux bubblewrap supervision requires a restricted filesystem policy; full-disk write policies are rejected because a writable procfs could expose the supervisor. The Linux seccomp rules match the pinned upstream source. Without a managed proxy, restricted Linux networking permits Unix socket pairs and ordinary descriptor read/write, but denies `sendto`, `shutdown`, socket-name queries, and socket-option calls even on local pairs. Connecting, binding, listening, and creating IP sockets remain denied. The [MCP Console handoff](MCP_CONSOLE_HANDOFF.md) describes the resulting sideband requirements.
+
+Without a caller-supplied extension, the ordinary macOS profile retains its existing sysctl, Mach-service, terminal, and filesystem restrictions. Applications may need caller-owned compatibility rules for operations outside those native permissions.
+
+Proxy protocol support and local-network exceptions are those of the release; the runner adds no UDP routing or approval service. There is no watchdog or custom recovery after the supervisor crashes or receives SIGKILL. Linux's native death chain can terminate workloads after readiness, with earlier setup windows outside that guarantee. macOS does not guarantee termination after runner loss. Neither platform promises private-storage deletion or terminal restoration after runner death. See [LIFECYCLE.md](LIFECYCLE.md) for these limits and Darwin's observation boundary.
+
+See the [handoff notes](PROTOCOL.md#downstream-handoff) and [upstream integration note](INTEGRATION.md).
