@@ -134,6 +134,14 @@ pub struct LandlockCommand {
     #[arg(long = "proxy-route-spec", hide = true)]
     pub proxy_route_spec: Option<String>,
 
+    /// Original stdin inherited through bubblewrap without its monitor retaining a reader.
+    #[arg(long = "stdin-fd", hide = true)]
+    pub stdin_fd: Option<libc::c_int>,
+
+    /// Native execution gate used only by run_main_with_target_setup callers.
+    #[arg(long = "target-setup-fd", hide = true)]
+    pub target_setup_fd: Option<libc::c_int>,
+
     /// Inherited fallback mounts that must be authenticated before sandboxed code runs.
     #[arg(long = "verify-fd-mount", hide = true)]
     pub verify_fd_mounts: Vec<String>,
@@ -157,6 +165,10 @@ pub struct LandlockCommand {
 /// 2. Apply in-process restrictions (no_new_privs + seccomp).
 /// 3. `execvp` into the final command.
 pub fn run_main() -> ! {
+    run_main_with_target_setup(None)
+}
+
+pub(crate) fn run_main_with_target_setup(setup: Option<crate::TargetSetupHook>) -> ! {
     let LandlockCommand {
         sandbox_policy_cwd,
         command_cwd,
@@ -166,12 +178,33 @@ pub fn run_main() -> ! {
         allow_network_for_proxy,
         proxy_route_spec,
         verify_fd_mounts,
+        stdin_fd,
+        target_setup_fd,
         no_proc,
         command,
     } = LandlockCommand::parse();
 
+    if let Some(fd) = target_setup_fd {
+        assert!(
+            fd > libc::STDERR_FILENO && setup.is_some(),
+            "target setup requires a native hook and a private descriptor"
+        );
+    }
+
     if command.is_empty() {
         panic!("No command specified to execute.");
+    }
+    if let Some(fd) = stdin_fd {
+        assert!(
+            apply_seccomp_then_exec && fd > libc::STDERR_FILENO,
+            "stdin fd requires the inner sandbox stage"
+        );
+        assert!(
+            unsafe { libc::dup2(fd, libc::STDIN_FILENO) } >= 0,
+            "restore sandbox command stdin: {}",
+            std::io::Error::last_os_error()
+        );
+        close_fd_or_panic(fd, "close transferred sandbox stdin");
     }
     if !apply_seccomp_then_exec && !verify_fd_mounts.is_empty() {
         panic!("--verify-fd-mount is only supported in the inner sandbox stage");
@@ -239,21 +272,47 @@ pub fn run_main() -> ! {
             panic!("error applying Linux sandbox restrictions: {e:?}");
         }
 
+        use std::os::unix::process::CommandExt;
         let signal_mask = ForwardedSignalMask::block();
-        let command_pid = unsafe { libc::fork() };
-        if command_pid < 0 {
-            let err = std::io::Error::last_os_error();
-            panic!("failed to fork sandboxed command: {err}");
+        let mut target = std::process::Command::new(&command[0]);
+        target.args(&command[1..]);
+        unsafe {
+            target.pre_exec(move || {
+                reset_forwarded_signal_handlers_to_default();
+                signal_mask.restore();
+                Ok(())
+            });
         }
+        let control = if let Some(fd) = target_setup_fd {
+            let descriptor = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+            setup.unwrap_or_else(|| panic!("missing native hook"))(
+                &mut target,
+                descriptor,
+                crate::TargetSetupMode::Namespace,
+            )
+            .unwrap_or_else(|error| {
+                eprintln!("native target setup: {error}");
+                std::process::exit(1);
+            })
+        } else {
+            None
+        };
+        // The namespace-init loop below reaps this child with waitpid(-1).
+        #[expect(clippy::zombie_processes)]
+        let child = target
+            .spawn()
+            .unwrap_or_else(|error| panic!("spawn sandboxed command: {error}"));
+        let command_pid = child.id() as libc::pid_t;
+        drop(target);
 
-        if command_pid == 0 {
-            reset_forwarded_signal_handlers_to_default();
-            signal_mask.restore();
-            exec_or_panic(command);
-        }
-
+        // Only the command owns its input after fork. Retaining a reader here
+        // would hide command-side stdin closure from the caller's writer.
+        close_fd_or_panic(libc::STDIN_FILENO, "release namespace init stdin");
         let signal_forwarders = install_bwrap_signal_forwarders(command_pid);
         signal_mask.restore();
+        if let Some(control) = control {
+            crate::target_control::wait(control, command_pid);
+        }
         loop {
             let mut status = 0;
             let reaped_pid = unsafe { libc::waitpid(-1, &mut status, 0) };
@@ -274,7 +333,10 @@ pub fn run_main() -> ! {
         }
     }
 
-    if file_system_sandbox_policy.has_full_disk_write_access() && !allow_network_for_proxy {
+    if file_system_sandbox_policy.has_full_disk_write_access()
+        && !allow_network_for_proxy
+        && target_setup_fd.is_none()
+    {
         if let Err(e) = apply_permission_profile_to_current_thread(
             &permission_profile,
             &sandbox_policy_cwd,
@@ -298,7 +360,7 @@ pub fn run_main() -> ! {
         } else {
             (None, Vec::new())
         };
-        let inner = build_inner_seccomp_command(InnerSeccompCommandArgs {
+        let mut inner = build_inner_seccomp_command(InnerSeccompCommandArgs {
             sandbox_policy_cwd: &sandbox_policy_cwd,
             command_cwd: command_cwd.as_deref(),
             permission_profile: &permission_profile,
@@ -306,6 +368,9 @@ pub fn run_main() -> ! {
             proxy_route_spec,
             command,
         });
+        if let Some(fd) = target_setup_fd {
+            inner.splice(1..1, ["--target-setup-fd".to_string(), fd.to_string()]);
+        }
         run_bwrap_with_proc_fallback(
             &sandbox_policy_cwd,
             command_cwd.as_deref(),
@@ -326,6 +391,22 @@ pub fn run_main() -> ! {
         /*proxy_routed_network*/ false,
     ) {
         panic!("error applying legacy Linux sandbox restrictions: {e:?}");
+    }
+    if let Some(fd) = target_setup_fd {
+        use std::os::unix::process::CommandExt;
+        let mut target = std::process::Command::new(&command[0]);
+        target.args(&command[1..]);
+        let descriptor = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+        setup.unwrap_or_else(|| panic!("missing native hook"))(
+            &mut target,
+            descriptor,
+            crate::TargetSetupMode::Direct,
+        )
+        .unwrap_or_else(|error| {
+            eprintln!("native target setup: {error}");
+            std::process::exit(1)
+        });
+        panic!("exec sandboxed command: {}", target.exec());
     }
     exec_or_panic(command);
 }
@@ -594,6 +675,7 @@ fn run_bwrap_in_child_with_synthetic_mount_cleanup(bwrap_args: crate::bwrap::Bwr
     }
 
     drop(preserved_files);
+    close_fd_or_panic(libc::STDIN_FILENO, "release bubblewrap supervisor stdin");
     close_child_exec_start_read(exec_start_pipe[0]);
     let protected_create_monitor = ProtectedCreateMonitor::start(&protected_create_targets);
     let signal_forwarders = install_bwrap_signal_forwarders(pid);
@@ -804,6 +886,7 @@ fn release_child_exec_start(write_fd: libc::c_int) {
     }
 }
 
+#[derive(Clone, Copy)]
 struct ForwardedSignalMask {
     previous: libc::sigset_t,
 }
@@ -1367,7 +1450,7 @@ fn hash_path(path: &Path) -> u64 {
     hash
 }
 
-fn exit_with_wait_status(status: libc::c_int) -> ! {
+pub(crate) fn exit_with_wait_status(status: libc::c_int) -> ! {
     if libc::WIFEXITED(status) {
         std::process::exit(libc::WEXITSTATUS(status));
     }
