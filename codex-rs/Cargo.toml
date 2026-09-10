@@ -79,6 +79,7 @@ members = [
     "lmstudio",
     "login",
     "codex-mcp",
+    "mcp-console-sandbox",
     "memories/read",
     "memories/write",
     "model-provider-info",

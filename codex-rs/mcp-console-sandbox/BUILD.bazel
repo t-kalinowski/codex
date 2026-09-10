@@ -1,0 +1,75 @@
+load("@crates//:defs.bzl", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_test")
+
+filegroup(
+    name = "package-files",
+    srcs = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+rust_binary(
+    name = "mcp-console-sandbox",
+    srcs = glob(["src/*.rs"]),
+    crate_root = "src/main.rs",
+    edition = "2024",
+    visibility = ["//visibility:public"],
+    deps = all_crate_deps(),
+)
+
+rust_binary(
+    name = "mcp-console-sandbox-fixture",
+    srcs = glob(["src/bin/**/*.rs"]),
+    crate_root = "src/bin/mcp_console_sandbox_fixture.rs",
+    edition = "2024",
+    # The target probe needs no sandbox or proxy dependencies.
+    deps = [
+        "@crates//:anyhow",
+        "@crates//:libc",
+        "@crates//:serde_json",
+    ],
+)
+
+rust_test(
+    name = "bootstrap-contract-test",
+    srcs = [
+        "src/codex.rs",
+        "tests/bootstrap_contract.rs",
+        "tests/lifecycle/cancellation_tests.rs",
+        "tests/lifecycle/config_tests.rs",
+        "tests/lifecycle/lifecycle_tests.rs",
+        "tests/lifecycle/ownership_tests.rs",
+        "tests/lifecycle/prerequisite_tests.rs",
+        "tests/lifecycle/retirement_tests.rs",
+        "tests/lifecycle/security_tests.rs",
+        "tests/lifecycle/startup_tests.rs",
+        "tests/lifecycle/terminal_tests.rs",
+        "tests/transport/transport_tests.rs",
+    ],
+    crate_root = "tests/bootstrap_contract.rs",
+    data = [
+        "tests/lifecycle/interposer.c",
+        "tests/lifecycle/procfs_interposer.c",
+        ":mcp-console-sandbox",
+        ":mcp-console-sandbox-fixture",
+    ] + select({
+        "@platforms//os:linux": ["//codex-rs/bwrap"],
+        "//conditions:default": [],
+    }),
+    edition = "2024",
+    env = {
+        "CARGO_BIN_EXE_mcp-console-sandbox": "$(rlocationpath :mcp-console-sandbox)",
+        "CARGO_BIN_EXE_mcp-console-sandbox-fixture": "$(rlocationpath :mcp-console-sandbox-fixture)",
+    } | select({
+        "@platforms//os:linux": {"CARGO_BIN_EXE_bwrap": "$(rlocationpath //codex-rs/bwrap:bwrap)"},
+        "//conditions:default": {},
+    }),
+    rustc_env = {"BAZEL_PACKAGE": package_name()},
+    tags = ["no-sandbox"],
+    deps = all_crate_deps(
+        normal = True,
+        normal_dev = True,
+    ),
+)
