@@ -48,6 +48,7 @@ pub async fn run(request: Bootstrap, stdin: File, signals: Signals) -> Result<i3
     // Keep the setup channel alive through retirement. Closing a partial frame
     // first wakes the native reader with a spurious startup error.
     let mut gate = None;
+    let mut target = None;
     let mut observation_failed = false;
     let startup_cancellation = || -> Result<Option<i32>> {
         if !parent
@@ -85,7 +86,7 @@ pub async fn run(request: Bootstrap, stdin: File, signals: Signals) -> Result<i3
             }
             tokio::select! {
                 native = &mut preparation => break native?,
-                _ = tokio::time::sleep(Duration::from_millis(10)) => {}
+                event = signals.changed() => { event?; }
             }
         };
         prepared = Some(native);
@@ -146,8 +147,8 @@ pub async fn run(request: Bootstrap, stdin: File, signals: Signals) -> Result<i3
             .inspect_err(|_| observation_failed = true)
             .context("establish descendant observation")?;
         terminal.transfer(root.id() as i32)?;
-        let mut target = None;
         loop {
+            let pending_signals = signals.pending()?;
             tracker
                 .observe()
                 .inspect_err(|_| observation_failed = true)?;
@@ -163,7 +164,7 @@ pub async fn run(request: Bootstrap, stdin: File, signals: Signals) -> Result<i3
             {
                 return Ok(0);
             }
-            for signal in signals.pending()? {
+            for signal in pending_signals {
                 if signal == libc::SIGTERM && sigterm == Sigterm::Retire {
                     return Ok(0);
                 }
@@ -175,13 +176,31 @@ pub async fn run(request: Bootstrap, stdin: File, signals: Signals) -> Result<i3
                     }
                 }
             }
-            if let Some(pending) = &mut gate
-                && pending.advance(root.id() as i32)?
-            {
-                target = pending.target.take();
-                gate = None;
+            if let Some(pending) = &mut gate {
+                match pending.advance(root.id() as i32) {
+                    Ok(false) => {}
+                    Ok(true) => {
+                        target = pending.target.take();
+                        gate = None;
+                    }
+                    Err(error)
+                        if error.downcast_ref::<std::io::Error>().is_some_and(|error| {
+                            matches!(
+                                error.kind(),
+                                std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::BrokenPipe
+                            )
+                        }) =>
+                    {
+                        // A native failure can close setup before its exit is
+                        // waitable. Preserve that exit status and wait on SIGCHLD.
+                        target = pending.target.take();
+                        gate = None;
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                }
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            wait_activity(&signals, gate.as_ref()).await?;
         }
     }
     .await;
@@ -198,6 +217,34 @@ pub async fn run(request: Bootstrap, stdin: File, signals: Signals) -> Result<i3
     let mut retired = false;
     let mut retirement_failed = observation_failed;
     loop {
+        if let Err(error) = signals.pending() {
+            errors.push(format!("observe retirement signals: {error}"));
+            retirement_failed = true;
+            break;
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(root) = &child
+            && platform::root_status(root.id() as i32).is_ok_and(|status| status.is_none())
+        {
+            let retirement = if let Some(target) = &target {
+                platform::forward(target, libc::SIGKILL).map_err(anyhow::Error::from)
+            } else if let Some(pending) = &mut gate {
+                pending.retire(root.id() as i32).map(|closed| {
+                    if closed {
+                        gate = None;
+                    }
+                })
+            } else {
+                Ok(())
+            };
+            if let Err(error) = retirement {
+                if !retirement_failed {
+                    errors.push(format!("native retirement failed: {error}"));
+                }
+                retirement_failed = true;
+                gate = None;
+            }
+        }
         match tracker.retire_pass() {
             Ok(true) => {
                 retired = true;
@@ -225,7 +272,19 @@ pub async fn run(request: Bootstrap, stdin: File, signals: Signals) -> Result<i3
             errors.push("timed out retiring sandbox descendants".to_owned());
             break;
         }
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        // A completed native monitor, readiness, or the deadline wakes retirement.
+        // Do not ask for writable setup events once cancellation has begun.
+        #[cfg(target_os = "linux")]
+        let pending_gate = gate.as_ref().filter(|gate| gate.target.is_none());
+        #[cfg(target_os = "macos")]
+        let pending_gate = gate.as_ref();
+        if let Ok(Err(error)) =
+            tokio::time::timeout_at(deadline.into(), wait_activity(&signals, pending_gate)).await
+        {
+            errors.push(format!("wait for native retirement: {error}"));
+            retirement_failed = true;
+            break;
+        }
     }
     if let Some(child) = &mut child
         && let Err(error) = child.try_wait()
@@ -255,4 +314,17 @@ pub async fn run(request: Bootstrap, stdin: File, signals: Signals) -> Result<i3
     }
     anyhow::ensure!(errors.is_empty(), "{}", errors.join("; "));
     Ok(status)
+}
+
+async fn wait_activity(signals: &Signals, gate: Option<&Gate>) -> std::io::Result<()> {
+    #[cfg(target_os = "linux")]
+    if let Some(gate) = gate {
+        return tokio::select! {
+            result = signals.changed() => result,
+            result = gate.changed() => result,
+        };
+    }
+    #[cfg(target_os = "macos")]
+    let _ = gate;
+    signals.changed().await
 }

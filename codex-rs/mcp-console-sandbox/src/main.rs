@@ -4,6 +4,8 @@ mod bootstrap;
 mod codex;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod config;
+#[cfg(target_os = "linux")]
+mod direct_linux;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod launch;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -93,7 +95,13 @@ fn run() -> anyhow::Result<i32> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?
-        .block_on(launch::run(request, stdin, signals))
+        .block_on(async move {
+            #[cfg(target_os = "linux")]
+            if request.linux_backend == Some(config::LinuxBackend::Landlock) {
+                return direct_linux::run(request, stdin, signals).await;
+            }
+            launch::run(request, stdin, signals).await
+        })
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]

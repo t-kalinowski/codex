@@ -70,6 +70,28 @@ impl Signals {
         Ok(Self { original, wait_set })
     }
 
+    #[cfg(target_os = "linux")]
+    pub fn notification(&self) -> io::Result<std::os::fd::OwnedFd> {
+        use std::os::fd::FromRawFd;
+        let fd =
+            unsafe { libc::signalfd(-1, &self.wait_set, libc::SFD_CLOEXEC | libc::SFD_NONBLOCK) };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) })
+    }
+
+    pub async fn changed(&self) -> io::Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            let notification = tokio::io::unix::AsyncFd::new(self.notification()?)?;
+            let _ready = notification.readable().await?;
+        }
+        #[cfg(target_os = "macos")]
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        Ok(())
+    }
+
     pub fn pending(&self) -> io::Result<Vec<i32>> {
         let mut result = Vec::new();
         loop {

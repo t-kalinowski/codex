@@ -31,6 +31,7 @@ pub struct Bootstrap {
     pub macos_seatbelt_profile_extension: Option<String>,
     #[serde(default)]
     pub lifecycle: Lifecycle,
+    pub linux_backend: Option<crate::config::LinuxBackend>,
 }
 
 #[derive(Deserialize)]
@@ -43,6 +44,7 @@ struct EnvironmentConfiguration {
     macos_seatbelt_profile_extension: Option<String>,
     #[serde(default)]
     lifecycle: Lifecycle,
+    linux_backend: Option<crate::config::LinuxBackend>,
     #[serde(default = "inherit_environment")]
     inherit_environment: bool,
     #[serde(default)]
@@ -120,6 +122,7 @@ pub fn take_input() -> Result<Input> {
             proxy: config.proxy,
             macos_seatbelt_profile_extension: config.macos_seatbelt_profile_extension,
             lifecycle: config.lifecycle,
+            linux_backend: config.linux_backend,
         };
         validate(&mut request)?;
         return Ok(Input::Environment(Box::new(request)));
@@ -194,6 +197,23 @@ fn parse_json<T: serde::de::DeserializeOwned>(payload: &[u8]) -> Result<T> {
 
 fn validate(request: &mut Bootstrap) -> Result<()> {
     request.lifecycle.validate()?;
+    ensure!(
+        cfg!(target_os = "linux") || request.linux_backend.is_none(),
+        "linux_backend is supported only on Linux"
+    );
+    if request.linux_backend == Some(crate::config::LinuxBackend::Landlock) {
+        ensure!(
+            request.proxy.is_none(),
+            "landlock does not support managed proxy routing"
+        );
+        ensure!(
+            request.lifecycle.parent_pid.is_none()
+                && request.lifecycle.private_tmp.is_none()
+                && request.lifecycle.cleanup_timeout_ms.is_none()
+                && request.lifecycle.sigterm == crate::config::Sigterm::Forward,
+            "landlock does not provide supervised lifetime; omit lifecycle options"
+        );
+    }
     request
         .excluded_environment
         .push(RESERVED_CONFIGURATION.to_owned());
@@ -238,18 +258,31 @@ fn read_cancellable(
     mut bytes: &mut [u8],
     signals: &crate::signals::Signals,
 ) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    let notification = signals.notification()?;
     while !bytes.is_empty() {
         ensure!(signals.pending()?.is_empty(), "startup cancelled by signal");
-        let mut descriptor = libc::pollfd {
-            fd: file.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        let count = unsafe { libc::poll(&mut descriptor, 1, 10) };
+        let mut descriptors = [
+            libc::pollfd {
+                fd: file.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                #[cfg(target_os = "linux")]
+                fd: notification.as_raw_fd(),
+                #[cfg(target_os = "macos")]
+                fd: -1,
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
+        let timeout = if cfg!(target_os = "linux") { -1 } else { 10 };
+        let count = unsafe { libc::poll(descriptors.as_mut_ptr(), 2, timeout) };
         if count < 0 {
             return Err(std::io::Error::last_os_error().into());
         }
-        if count == 0 {
+        if count == 0 || descriptors[0].revents == 0 {
             continue;
         }
         let count = file.read(bytes)?;

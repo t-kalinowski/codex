@@ -310,7 +310,7 @@ pub struct Target(i32);
 pub fn receive_ready(stream: &mut UnixStream, root: i32) -> io::Result<Option<Target>> {
     match stream.read(&mut [0]) {
         Ok(1) => Ok(Some(Target(root))),
-        Ok(_) => Err(io::Error::other("native setup closed before readiness")),
+        Ok(_) => Err(io::Error::from(io::ErrorKind::UnexpectedEof)),
         Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(None),
         Err(error) => Err(error),
     }

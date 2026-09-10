@@ -1,4 +1,4 @@
-//! One-shot execution boundary; no target code runs before the gate closes.
+//! One-shot execution boundary; only native init retains the private control channel.
 use anyhow::Context;
 use anyhow::Result;
 use serde::Deserialize;
@@ -30,7 +30,7 @@ pub struct Seatbelt {
     pub parameters: Vec<(String, String)>,
 }
 
-fn accept(descriptor: OwnedFd) -> Result<TargetSetup> {
+fn accept(descriptor: OwnedFd) -> Result<(TargetSetup, File)> {
     // The upstream restricted filter allows descriptor read/write, but denies
     // the sendto syscall used by UnixStream::write on Linux.
     let mut stream = File::from(descriptor);
@@ -46,19 +46,50 @@ fn accept(descriptor: OwnedFd) -> Result<TargetSetup> {
     let mut payload = vec![0; length];
     stream.read_exact(&mut payload)?;
     let setup = serde_json::from_slice(&payload).context("native setup JSON")?;
-    drop(stream);
-    Ok(setup)
+    Ok((setup, stream))
 }
 
 #[cfg(target_os = "linux")]
-pub fn linux_target_setup(command: &mut Command, descriptor: OwnedFd) -> std::io::Result<()> {
-    // Re-arm after bubblewrap's credential/exec boundary, before announcing
-    // readiness. The existing gate rejects an orphaned startup; namespace-init
-    // death also kills detached workload descendants.
-    if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) } < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    let setup = accept(descriptor).map_err(std::io::Error::other)?;
+pub fn linux_target_setup(
+    command: &mut Command,
+    descriptor: OwnedFd,
+    mode: codex_linux_sandbox::TargetSetupMode,
+) -> std::io::Result<Option<OwnedFd>> {
+    let (setup, channel): (TargetSetup, Option<File>) = match mode {
+        codex_linux_sandbox::TargetSetupMode::Namespace => {
+            // Re-arm after bubblewrap's credential/exec boundary, before readiness.
+            if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0) } < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            let (setup, channel) = match accept(descriptor) {
+                Ok(value) => value,
+                Err(error)
+                    if error.downcast_ref::<std::io::Error>().is_some_and(|e| {
+                        matches!(
+                            e.kind(),
+                            std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::BrokenPipe
+                        )
+                    }) =>
+                {
+                    std::process::exit(0)
+                }
+                Err(error) => return Err(std::io::Error::other(error)),
+            };
+            use std::os::fd::AsRawFd;
+            if unsafe { libc::fcntl(channel.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            (setup, Some(channel))
+        }
+        codex_linux_sandbox::TargetSetupMode::Direct => {
+            // Only the trusted pre-exec stages can access the sealed setup file.
+            // There is no host supervisor or control endpoint in direct mode.
+            (
+                serde_json::from_reader(File::from(descriptor)).map_err(std::io::Error::other)?,
+                None,
+            )
+        }
+    };
     // Install the target environment only after enforcement and helper setup.
     // Only managed proxy values rewritten in the namespace cross this boundary.
     command.env_clear().envs(&setup.environment);
@@ -76,7 +107,7 @@ pub fn linux_target_setup(command: &mut Command, descriptor: OwnedFd) -> std::io
     unsafe {
         command.pre_exec(move || setup.signals.restore());
     }
-    Ok(())
+    Ok(channel.map(Into::into))
 }
 
 #[cfg(target_os = "macos")]
@@ -86,7 +117,8 @@ pub fn macos_main() -> Result<()> {
         .context("native setup fd")?
         .parse()?;
     anyhow::ensure!(fd > 2, "native setup fd must be private");
-    let setup = accept(unsafe { OwnedFd::from_raw_fd(fd) })?;
+    let (setup, channel) = accept(unsafe { OwnedFd::from_raw_fd(fd) })?;
+    drop(channel);
     let profile = setup.seatbelt.context("native Seatbelt profile")?;
     apply_seatbelt(profile)?;
     let mut command = Command::new(&setup.command[0]);
@@ -171,6 +203,34 @@ impl Gate {
             written: 0,
             target: None,
         })
+    }
+
+    #[cfg(target_os = "linux")]
+    pub async fn changed(&self) -> std::io::Result<()> {
+        use std::os::fd::AsFd;
+        let notification = tokio::io::unix::AsyncFd::new(self.stream.as_fd())?;
+        let _ready = if self.target.is_none() {
+            notification.readable().await?
+        } else {
+            notification.writable().await?
+        };
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn retire(&mut self, root: i32) -> Result<bool> {
+        if self.target.is_none() {
+            self.target = match crate::platform::receive_ready(&mut self.stream, root) {
+                Ok(target) => target,
+                Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(true),
+                Err(error) => return Err(error.into()),
+            };
+        }
+        if let Some(target) = &self.target {
+            crate::platform::forward(target, libc::SIGKILL)?;
+            return Ok(true);
+        }
+        Ok(false)
     }
 
     pub fn advance(&mut self, root: i32) -> Result<bool> {

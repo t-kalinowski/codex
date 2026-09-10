@@ -33,33 +33,25 @@ fn signal(fd: &OwnedFd, signal: i32) -> io::Result<()> {
 
 pub struct Parent {
     pid: i32,
-    fd: OwnedFd,
 }
 impl Parent {
     pub fn capture(pid: i32) -> io::Result<Self> {
         if unsafe { libc::getppid() } != pid {
             return Err(io::Error::other("parent_pid is not the current parent"));
         }
-        let value = Self {
-            pid,
-            fd: pidfd(pid)?,
-        };
+        // The caller is our direct parent. Its death changes getppid and wakes
+        // the existing SIGCHLD wait set; no PID lookup or pidfd is needed.
+        if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGCHLD, 0, 0, 0) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let value = Self { pid };
         if !value.alive()? {
             return Err(io::Error::other("parent exited during startup"));
         }
         Ok(value)
     }
     pub fn alive(&self) -> io::Result<bool> {
-        let mut descriptor = libc::pollfd {
-            fd: self.fd.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        let count = unsafe { libc::poll(&mut descriptor, 1, 0) };
-        if count < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(count == 0 && unsafe { libc::getppid() } == self.pid)
+        Ok(unsafe { libc::getppid() } == self.pid)
     }
 }
 
@@ -68,9 +60,6 @@ pub struct Tracker {
 }
 impl Tracker {
     pub fn new() -> io::Result<Self> {
-        if unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) } < 0 {
-            return Err(io::Error::last_os_error());
-        }
         Ok(Self { root: None })
     }
     pub fn track_root(&mut self, pid: i32) -> io::Result<()> {
@@ -81,50 +70,20 @@ impl Tracker {
         Ok(())
     }
     pub fn retire_pass(&mut self) -> io::Result<bool> {
-        let mut children = Vec::new();
-        for task in std::fs::read_dir("/proc/self/task")? {
-            match std::fs::read_to_string(task?.path().join("children")) {
-                Ok(text) => {
-                    for child in text.split_whitespace() {
-                        children.push(child.parse::<i32>().map_err(io::Error::other)?);
-                    }
-                }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error),
-            }
-        }
-        children.sort_unstable();
-        children.dedup();
-        let mut live = false;
-        let mut failure = None;
-        for pid in children {
-            // Keep the direct root waitable until all adopted descendants have
-            // stopped. The shared supervisor owns its final reap and status.
-            if Some(pid) == self.root && super::root_status(pid)?.is_some() {
-                continue;
-            }
-            live = true;
-            let result = (|| {
-                let fd = pidfd(pid)?;
-                signal(&fd, libc::SIGKILL)?;
-                if Some(pid) == self.root {
-                    return Ok(());
-                }
-                let mut status = 0;
-                if unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) } < 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                Ok(())
-            })();
-            if let Err(error) = result {
-                failure.get_or_insert(error);
-            }
-        }
-        failure.map_or(Ok(!live), Err)
+        // The native monitor reaps namespace init after the kernel has retired
+        // that namespace. Keep our direct child waitable until this barrier.
+        self.root.map_or(Ok(true), |pid| {
+            super::root_status(pid).map(|status| status.is_some())
+        })
     }
 }
 
-pub type Target = OwnedFd;
+pub struct Target {
+    channel: UnixStream,
+    // Optional identity-safe emergency termination also reaches a stopped init.
+    // Ordinary forwarding and retirement use the private native channel.
+    pidfd: Option<OwnedFd>,
+}
 pub fn configure_channel(stream: &UnixStream) -> io::Result<()> {
     let enabled: libc::c_int = 1;
     if unsafe {
@@ -161,6 +120,9 @@ pub fn receive_ready(stream: &mut UnixStream, _: i32) -> io::Result<Option<Targe
         }
         return Err(error);
     }
+    if count == 0 {
+        return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
+    }
     if count != 1 || byte != 1 || message.msg_flags & libc::MSG_CTRUNC != 0 {
         return Err(io::Error::other("invalid native readiness"));
     }
@@ -183,10 +145,46 @@ pub fn receive_ready(stream: &mut UnixStream, _: i32) -> io::Result<Option<Targe
     if credentials.uid != unsafe { libc::geteuid() } || credentials.pid <= 1 {
         return Err(io::Error::other("invalid native readiness identity"));
     }
-    pidfd(credentials.pid).map(Some)
+    let pidfd = match pidfd(credentials.pid) {
+        Ok(fd) => Some(fd),
+        Err(error)
+            if matches!(
+                error.raw_os_error(),
+                Some(libc::ENOSYS | libc::EPERM | libc::EACCES)
+            ) =>
+        {
+            None
+        }
+        Err(error) => return Err(error),
+    };
+    Ok(Some(Target {
+        channel: stream.try_clone()?,
+        pidfd,
+    }))
 }
 pub fn forward(target: &Target, number: i32) -> io::Result<()> {
-    signal(target, number)
+    if number == libc::SIGKILL {
+        if let Some(fd) = &target.pidfd {
+            match signal(fd, number) {
+                Ok(()) => return Ok(()),
+                Err(error)
+                    if matches!(
+                        error.raw_os_error(),
+                        Some(libc::ENOSYS | libc::EPERM | libc::EACCES)
+                    ) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        return target.channel.shutdown(std::net::Shutdown::Write);
+    }
+    let byte = number as u8;
+    if unsafe { libc::write(target.channel.as_raw_fd(), (&byte as *const u8).cast(), 1) } < 0 {
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::BrokenPipe {
+            return Err(error);
+        }
+    }
+    Ok(())
 }
 
 // Bubblewrap owns the target's separate session. Original terminal descriptors

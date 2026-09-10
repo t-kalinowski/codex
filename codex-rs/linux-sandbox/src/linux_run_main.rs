@@ -168,9 +168,7 @@ pub fn run_main() -> ! {
     run_main_with_target_setup(None)
 }
 
-pub(crate) fn run_main_with_target_setup(
-    setup: Option<fn(&mut std::process::Command, std::os::fd::OwnedFd) -> std::io::Result<()>>,
-) -> ! {
+pub(crate) fn run_main_with_target_setup(setup: Option<crate::TargetSetupHook>) -> ! {
     let LandlockCommand {
         sandbox_policy_cwd,
         command_cwd,
@@ -191,10 +189,6 @@ pub(crate) fn run_main_with_target_setup(
             fd > libc::STDERR_FILENO && setup.is_some(),
             "target setup requires a native hook and a private descriptor"
         );
-        if use_legacy_landlock || no_proc {
-            eprintln!("native target setup requires PID isolation and namespace-local procfs");
-            std::process::exit(1);
-        }
     }
 
     if command.is_empty() {
@@ -289,23 +283,20 @@ pub(crate) fn run_main_with_target_setup(
                 Ok(())
             });
         }
-        if let Some(fd) = target_setup_fd {
-            // A host procfs would expose unsandboxed processes and descriptors.
-            let procfs = fs::read_link("/proc/self").unwrap_or_else(|error| {
-                eprintln!("native target setup: inspect sandbox procfs: {error}");
-                std::process::exit(1);
-            });
-            if procfs != std::process::id().to_string() {
-                eprintln!("native target setup requires namespace-local procfs");
-                std::process::exit(1);
-            }
+        let control = if let Some(fd) = target_setup_fd {
             let descriptor = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
-            setup.unwrap_or_else(|| panic!("missing native hook"))(&mut target, descriptor)
-                .unwrap_or_else(|error| {
-                    eprintln!("native target setup: {error}");
-                    std::process::exit(1);
-                });
-        }
+            setup.unwrap_or_else(|| panic!("missing native hook"))(
+                &mut target,
+                descriptor,
+                crate::TargetSetupMode::Namespace,
+            )
+            .unwrap_or_else(|error| {
+                eprintln!("native target setup: {error}");
+                std::process::exit(1);
+            })
+        } else {
+            None
+        };
         // The namespace-init loop below reaps this child with waitpid(-1).
         #[expect(clippy::zombie_processes)]
         let child = target
@@ -319,6 +310,9 @@ pub(crate) fn run_main_with_target_setup(
         close_fd_or_panic(libc::STDIN_FILENO, "release namespace init stdin");
         let signal_forwarders = install_bwrap_signal_forwarders(command_pid);
         signal_mask.restore();
+        if let Some(control) = control {
+            crate::target_control::wait(control, command_pid);
+        }
         loop {
             let mut status = 0;
             let reaped_pid = unsafe { libc::waitpid(-1, &mut status, 0) };
@@ -401,6 +395,22 @@ pub(crate) fn run_main_with_target_setup(
         /*proxy_routed_network*/ false,
     ) {
         panic!("error applying legacy Linux sandbox restrictions: {e:?}");
+    }
+    if let Some(fd) = target_setup_fd {
+        use std::os::unix::process::CommandExt;
+        let mut target = std::process::Command::new(&command[0]);
+        target.args(&command[1..]);
+        let descriptor = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd) };
+        setup.unwrap_or_else(|| panic!("missing native hook"))(
+            &mut target,
+            descriptor,
+            crate::TargetSetupMode::Direct,
+        )
+        .unwrap_or_else(|error| {
+            eprintln!("native target setup: {error}");
+            std::process::exit(1)
+        });
+        panic!("exec sandboxed command: {}", target.exec());
     }
     exec_or_panic(command);
 }
@@ -1443,7 +1453,7 @@ fn hash_path(path: &Path) -> u64 {
     hash
 }
 
-fn exit_with_wait_status(status: libc::c_int) -> ! {
+pub(crate) fn exit_with_wait_status(status: libc::c_int) -> ! {
     if libc::WIFEXITED(status) {
         std::process::exit(libc::WEXITSTATUS(status));
     }
