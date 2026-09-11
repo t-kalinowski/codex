@@ -16,6 +16,8 @@ mod policy;
 #[cfg(target_os = "linux")]
 #[path = "lifecycle/prerequisite_tests.rs"]
 mod prerequisite;
+#[path = "policy/reference_tests.rs"]
+mod reference;
 #[path = "lifecycle/retirement_tests.rs"]
 mod retirement;
 #[path = "lifecycle/security_tests.rs"]

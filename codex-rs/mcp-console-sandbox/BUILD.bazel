@@ -47,10 +47,12 @@ rust_test(
         "tests/lifecycle/startup_tests.rs",
         "tests/lifecycle/terminal_tests.rs",
         "tests/policy/policy_tests.rs",
+        "tests/policy/reference_tests.rs",
         "tests/transport/transport_tests.rs",
     ],
     crate_root = "tests/bootstrap_contract.rs",
     data = [
+        "PROTOCOL.md",
         "tests/lifecycle/interposer.c",
         "tests/lifecycle/procfs_interposer.c",
         ":mcp-console-sandbox",

@@ -1,6 +1,6 @@
 # Linux host compatibility
 
-The comparison starts at the former downstream pin `d488fc969da435f93ea5937c7f284fa91a8c2575`; runner `7aacbcf1bca0f173f036617a5ee8ae71e18fb8cc` implements the changes below. Default execution still uses bubblewrap and the requested filesystem/network policy. Namespace or policy failure never selects an unrestricted target or a different backend. Current source integration and upgrade review points are in [INTEGRATION.md](INTEGRATION.md).
+The historical comparison table starts at the former downstream pin `d488fc969da435f93ea5937c7f284fa91a8c2575` and records runner `7aacbcf1bca0f173f036617a5ee8ae71e18fb8cc`. Default managed execution uses bubblewrap and the requested filesystem/network policy; caller-selected external enforcement is described in the [JSON reference](PROTOCOL.md#network-proxy-and-enforcement-selection). Namespace or policy failure never selects an unrestricted target or a different backend. Current source integration and upgrade review points are in [INTEGRATION.md](INTEGRATION.md).
 
 | Host condition                                            | Previous integration                                      | Current behavior                                                                |
 | --------------------------------------------------------- | --------------------------------------------------------- | ------------------------------------------------------------------------------- |
@@ -19,7 +19,7 @@ The comparison's tested baseline is x86_64 Ubuntu with kernel `6.8.0-139-generic
 
 ## Host requirements
 
-Bubblewrap execution needs mounted procfs, permission for the selected helper's namespace operations, and the requested seccomp/network enforcement capabilities. A fresh procfs mount is optional: the inherited view retains user, mount, and PID isolation, but exposes permitted host PIDs and metadata. Process tools that assume procfs PIDs match namespace PIDs may not work there. Supervision requires a restricted filesystem policy; full-disk-write policies are rejected because writable procfs could expose the supervisor.
+Bubblewrap execution needs mounted procfs, permission for the selected helper's namespace operations, and the requested seccomp/network enforcement capabilities. A fresh procfs mount is optional: the inherited view retains user, mount, and PID isolation, but exposes permitted host PIDs and metadata. Process tools that assume procfs PIDs match namespace PIDs may not work there. Caller-selected unrestricted filesystem access is supported with restricted, enabled, or managed-proxy networking. Namespace init remains active for setup, signals and ordinary retirement even with full network access. Writable host paths and procfs can weaken protection of helpers, supervisor authority, or other same-user processes; this is not limited to cleanup failure. Influencing an unsandboxed process through shared files can indirectly bypass network or other restrictions. These accepted limits do not change the native network policy or require fresh procfs. Restricted filesystem policies retain their stronger boundary.
 
 This command probes namespace permissions:
 
@@ -38,6 +38,18 @@ Before removing the procfs restriction, differential probes exercised the pinned
 Inherited procfs exposed host PIDs. Access through host `environ`, `root`, `cwd`, file descriptors, and memory remained denied. File writes, host control-pipe writes, signals, ptrace, process-memory syscalls, and network-namespace entry did not bypass the selected policy. Direct file reads and loopback connections followed the requested read and network permissions. Readable process metadata was evaluated against the declared read policy.
 
 The downstream executable tests repeat the matrix against the supervised runner, including a real nested mount that makes the native procfs preflight choose its supported fallback. They also attempt to read the supervisor's launch environment, write its memory, acquire an intentionally inherited host control pipe, and signal it. Listing fd-directory names can succeed under the root-read policy; following those links and accessing the control endpoint remain denied. Changing the transport-looking environment variable inside the target does not change accepted policy.
+
+## Unrestricted procfs observations
+
+On 2026-09-11, the current implementation was exercised with fresh procfs and with an outer bubblewrap mount of read-only `/proc/sys` that makes the inner native preflight select inherited procfs. The host was x86_64 Linux `6.8.0-139-generic` in a privileged Ubuntu container. The eight launches combined root-readable restricted or unrestricted filesystem policies with restricted or enabled networking and ordinary private storage. Probes used disposable same-user processes, synthetic files/environment/memory, an explicitly ptraceable fixture, a private control pipe and a loopback listener; no unrelated host data was inspected.
+
+Unrestricted direct writes succeeded in both procfs views. Direct network connections succeeded only with enabled networking. Inherited procfs exposed host PIDs and supervisor fd-directory metadata. The tested host/supervisor environment, memory and control-endpoint access, ptrace/process-memory operations and network-namespace entry remained denied. Fresh procfs hid the host identities. All eight launches completed without runner diagnostics; synthetic host memory and control pipes were unchanged.
+
+These probes ran as container root, whose host capabilities differ from the sandbox target's dropped capabilities. A non-root attempt failed during native network-namespace setup with `Failed RTM_NEWADDR: Operation not permitted`, before the probe could run. The observations therefore do not establish the same procfs access boundary for every same-user, capability, AppArmor or kernel configuration. They do not establish protection against influencing unsandboxed processes through shared writable files, and do not make that stronger guarantee a prerequisite for unrestricted access.
+
+## External enforcement
+
+Without a managed proxy, `external-sandbox` uses upstream selection of no native sandbox. The runner still supplies stdio, target environment, signals, caller-death observation and private storage. Linux retirement signals the original process group and waits for the direct child; the outer sandbox must handle detached descendants. Normal shutdown performs cleanup, but the direct-child wait does not prove all detached processes have retired. With a proxy, upstream native routing and namespace lifecycle are used. Declaring external restricted networking without providing an outer sandbox does not restrict host connections.
 
 ## Landlock boundary
 
