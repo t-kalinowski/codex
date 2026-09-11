@@ -18,6 +18,7 @@ fn documented_payloads_execute_through_both_production_transports() {
         } else {
             let directory = tempfile::tempdir().unwrap();
             runner(directory.path())
+                .current_dir(directory.path())
                 .args([
                     "--config-env",
                     "SANDBOX_REQUEST",

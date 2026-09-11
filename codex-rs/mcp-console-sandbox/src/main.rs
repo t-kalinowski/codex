@@ -13,6 +13,8 @@ mod native;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod platform;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+mod profiles;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod signals;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod storage;

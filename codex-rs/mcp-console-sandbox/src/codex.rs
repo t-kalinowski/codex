@@ -24,7 +24,6 @@ mod upstream {
     use codex_protocol::permissions::FileSystemAccessMode;
     use codex_protocol::permissions::FileSystemPath;
     use codex_protocol::permissions::FileSystemSandboxEntry;
-    use codex_protocol::permissions::FileSystemSandboxPolicy;
     pub use codex_protocol::permissions::NetworkSandboxPolicy;
     pub use codex_protocol::permissions::RawFileSystemSandboxPolicy;
     use codex_sandboxing::SandboxManager;
@@ -61,9 +60,7 @@ mod upstream {
             cfg!(target_os = "macos") || request.macos_seatbelt_profile_extension.is_none(),
             "macos_seatbelt_profile_extension is supported only on macOS"
         );
-        let mut filesystem = FileSystemSandboxPolicy::try_from(request.filesystem)
-            .map_err(anyhow::Error::msg)
-            .context("invalid filesystem policy")?;
+        let (mut filesystem, network) = crate::profiles::resolve(&request)?;
         let mut environment = request.environment;
         if let Some(storage) = storage {
             #[cfg(target_os = "macos")]
@@ -93,7 +90,7 @@ mod upstream {
                 );
             }
         }
-        let permissions = PermissionProfile::from_runtime_permissions(&filesystem, request.network);
+        let permissions = PermissionProfile::from_runtime_permissions(&filesystem, network);
         let filesystem = permissions.file_system_sandbox_policy();
         let manager = SandboxManager::default();
         // Managed launches require native init for target setup and retirement,
@@ -197,7 +194,7 @@ mod upstream {
             let mut profile = create_seatbelt_profile(CreateSeatbeltCommandArgsParams {
                 command: Vec::new(),
                 file_system_sandbox_policy: &filesystem,
-                network_sandbox_policy: request.network,
+                network_sandbox_policy: network,
                 sandbox_policy_cwd: request.cwd.as_path(),
                 enforce_managed_network: proxy.is_some(),
                 managed_network: managed_network.as_ref(),

@@ -25,8 +25,13 @@ pub struct Bootstrap {
     pub command: Vec<String>,
     pub cwd: AbsolutePathBuf,
     pub environment: HashMap<String, String>,
-    pub filesystem: RawFileSystemSandboxPolicy,
-    pub network: NetworkSandboxPolicy,
+    #[serde(default, deserialize_with = "supplied")]
+    pub filesystem: Option<RawFileSystemSandboxPolicy>,
+    #[serde(default, deserialize_with = "supplied")]
+    pub network: Option<NetworkSandboxPolicy>,
+    pub extends: Option<String>,
+    pub workspace: Option<AbsolutePathBuf>,
+    pub workspace_options: Option<crate::profiles::WorkspaceOptions>,
     pub proxy: Option<RemoteNetworkProxyConfig>,
     pub macos_seatbelt_profile_extension: Option<String>,
     #[serde(default)]
@@ -38,8 +43,13 @@ pub struct Bootstrap {
 #[serde(deny_unknown_fields)]
 struct EnvironmentConfiguration {
     version: u32,
-    filesystem: RawFileSystemSandboxPolicy,
-    network: NetworkSandboxPolicy,
+    #[serde(default, deserialize_with = "supplied")]
+    filesystem: Option<RawFileSystemSandboxPolicy>,
+    #[serde(default, deserialize_with = "supplied")]
+    network: Option<NetworkSandboxPolicy>,
+    extends: Option<String>,
+    workspace: Option<AbsolutePathBuf>,
+    workspace_options: Option<crate::profiles::WorkspaceOptions>,
     proxy: Option<RemoteNetworkProxyConfig>,
     macos_seatbelt_profile_extension: Option<String>,
     #[serde(default)]
@@ -49,6 +59,15 @@ struct EnvironmentConfiguration {
     inherit_environment: bool,
     #[serde(default)]
     environment: HashMap<String, String>,
+}
+
+// Omitted policy fields can inherit a built-in; explicit null is not a native policy.
+fn supplied<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
 }
 
 fn inherit_environment() -> bool {
@@ -119,6 +138,9 @@ pub fn take_input() -> Result<Input> {
             environment,
             filesystem: config.filesystem,
             network: config.network,
+            extends: config.extends,
+            workspace: config.workspace,
+            workspace_options: config.workspace_options,
             proxy: config.proxy,
             macos_seatbelt_profile_extension: config.macos_seatbelt_profile_extension,
             lifecycle: config.lifecycle,
