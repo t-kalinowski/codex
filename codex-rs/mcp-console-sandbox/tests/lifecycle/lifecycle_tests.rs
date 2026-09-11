@@ -72,30 +72,34 @@ fn retirement_kills_detached_descendant_and_waits_for_storage_cleanup() {
 
 #[test]
 fn inherited_signal_state_reaches_target_and_sigchld_remains_waitable() {
-    let directory = tempfile::tempdir().unwrap();
-    let mut command = runner(directory.path());
-    unsafe {
-        command.pre_exec(|| {
-            for signal in [
-                libc::SIGHUP,
-                libc::SIGINT,
-                libc::SIGTERM,
-                libc::SIGCHLD,
-                libc::SIGUSR2,
-                #[cfg(target_os = "linux")]
-                libc::SIGRTMAX(),
-            ] {
-                libc::signal(signal, libc::SIG_IGN);
-            }
-            let mut mask = std::mem::zeroed();
-            libc::sigemptyset(&mut mask);
-            libc::sigaddset(&mut mask, libc::SIGUSR1);
-            libc::pthread_sigmask(libc::SIG_BLOCK, &mask, std::ptr::null_mut());
-            Ok(())
-        });
+    for kind in ["restricted", "unrestricted", "external-sandbox"] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut command = runner(directory.path());
+        unsafe {
+            command.pre_exec(|| {
+                for signal in [
+                    libc::SIGHUP,
+                    libc::SIGINT,
+                    libc::SIGTERM,
+                    libc::SIGCHLD,
+                    libc::SIGUSR2,
+                    #[cfg(target_os = "linux")]
+                    libc::SIGRTMAX(),
+                ] {
+                    libc::signal(signal, libc::SIG_IGN);
+                }
+                let mut mask = std::mem::zeroed();
+                libc::sigemptyset(&mut mask);
+                libc::sigaddset(&mut mask, libc::SIGUSR1);
+                libc::pthread_sigmask(libc::SIG_BLOCK, &mask, std::ptr::null_mut());
+                Ok(())
+            });
+        }
+        let mut request = managed("signals");
+        request["filesystem"]["kind"] = json!(kind);
+        let output = run_command(command, frame(&request), &[]);
+        assert_eq!(output.status.code(), Some(42), "{output:?}");
     }
-    let output = run_command(command, frame(&managed("signals")), &[]);
-    assert_eq!(output.status.code(), Some(42), "{output:?}");
 }
 
 #[test]

@@ -49,7 +49,8 @@ impl Storage {
         })
     }
 
-    /// Called only after retirement proves there is no executing descendant.
+    /// Called after retirement. External enforcement relies on the outer
+    /// sandbox to retire descendants that escape ordinary process supervision.
     pub fn remove(self) -> Result<()> {
         let result = (|| {
             if unsafe { libc::fchmod(self.directory.as_raw_fd(), 0o700) } < 0 {

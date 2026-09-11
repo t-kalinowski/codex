@@ -70,8 +70,9 @@ impl Tracker {
         Ok(())
     }
     pub fn retire_pass(&mut self) -> io::Result<bool> {
-        // The native monitor reaps namespace init after the kernel has retired
-        // that namespace. Keep our direct child waitable until this barrier.
+        // For native execution the monitor reaps init after namespace retirement.
+        // External enforcement observes only our direct child; the outer sandbox
+        // owns detached descendants. Keep the child waitable until this step.
         self.root.map_or(Ok(true), |pid| {
             super::root_status(pid).map(|status| status.is_some())
         })

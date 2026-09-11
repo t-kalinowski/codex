@@ -375,10 +375,14 @@ pub(crate) fn run_main_with_target_setup(setup: Option<crate::TargetSetupHook>) 
             &sandbox_policy_cwd,
             command_cwd.as_deref(),
             &file_system_sandbox_policy,
-            bwrap_network_mode(network_sandbox_policy, allow_network_for_proxy),
             inner,
             proxy_controls,
-            !no_proc,
+            BwrapOptions {
+                mount_proc: !no_proc,
+                network_mode: bwrap_network_mode(network_sandbox_policy, allow_network_for_proxy),
+                require_process_isolation: target_setup_fd.is_some(),
+                ..Default::default()
+            },
         );
     }
 
@@ -475,28 +479,21 @@ fn run_bwrap_with_proc_fallback(
     sandbox_policy_cwd: &Path,
     command_cwd: Option<&Path>,
     file_system_sandbox_policy: &FileSystemSandboxPolicy,
-    network_mode: BwrapNetworkMode,
     inner: Vec<String>,
     proxy_controls: Vec<File>,
-    mount_proc: bool,
+    mut options: BwrapOptions,
 ) -> ! {
-    let mut mount_proc = mount_proc;
     let command_cwd = command_cwd.unwrap_or(sandbox_policy_cwd);
 
-    if mount_proc
-        && !preflight_proc_mount_support(network_mode)
+    if options.mount_proc
+        && !preflight_proc_mount_support(options.network_mode)
             .unwrap_or_else(|err| exit_with_bwrap_build_error(err))
     {
         // Keep the retry silent so sandbox-internal diagnostics do not leak into the
         // child process stderr stream.
-        mount_proc = false;
+        options.mount_proc = false;
     }
 
-    let options = BwrapOptions {
-        mount_proc,
-        network_mode,
-        ..Default::default()
-    };
     let mut bwrap_args = build_bwrap_argv(
         inner,
         file_system_sandbox_policy,

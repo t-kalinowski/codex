@@ -7,16 +7,20 @@ use std::os::fd::FromRawFd;
 
 #[test]
 fn controlling_terminal_delivers_interrupt_once() {
-    terminal_case("exclusive");
+    for filesystem in ["restricted", "unrestricted", "external-sandbox"] {
+        terminal_case("exclusive", filesystem);
+    }
 }
 
 #[cfg(target_os = "macos")]
 #[test]
 fn foreground_peer_keeps_terminal_ownership() {
-    terminal_case("peer");
+    for filesystem in ["restricted", "unrestricted", "external-sandbox"] {
+        terminal_case("peer", filesystem);
+    }
 }
 
-fn terminal_case(kind: &str) {
+fn terminal_case(kind: &str, filesystem: &str) {
     let directory = tempfile::tempdir().unwrap();
     let mut master = -1;
     let mut slave = -1;
@@ -35,6 +39,7 @@ fn terminal_case(kind: &str) {
     let mut master = unsafe { File::from_raw_fd(master) };
     let slave = unsafe { File::from_raw_fd(slave) };
     let mut request = fixture("terminal", &[kind]);
+    request["filesystem"]["kind"] = json!(filesystem);
     for field in ["command", "cwd", "environment"] {
         request.as_object_mut().unwrap().remove(field);
     }
@@ -63,6 +68,7 @@ fn terminal_case(kind: &str) {
         });
     }
     let mut child = command.spawn().unwrap();
+    let _runner_watch = ownership::Process::watch(child.id() as i32);
     drop(command);
     let mut stdout = BufReader::new(child.stdout.take().unwrap());
     let mut line = String::new();
@@ -76,6 +82,10 @@ fn terminal_case(kind: &str) {
     };
     stdout.read_line(&mut line).unwrap();
     let ready: Value = serde_json::from_str(&line).unwrap();
+    #[cfg(target_os = "linux")]
+    let _target_watch = ownership::watch_tree(child.id() as i32);
+    #[cfg(target_os = "macos")]
+    let _target_watch = ownership::Process::watch(ready["pid"].as_i64().unwrap() as i32);
     let foreground = unsafe { libc::tcgetpgrp(master.as_raw_fd()) };
     #[cfg(target_os = "macos")]
     assert_eq!(
@@ -90,6 +100,16 @@ fn terminal_case(kind: &str) {
     assert_eq!(foreground, child.id() as i32);
     if kind == "exclusive" {
         master.write_all(b"terminal input\n").unwrap();
+        let mut readable = libc::pollfd {
+            fd: stdout.get_ref().as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        assert_eq!(
+            unsafe { libc::poll(&mut readable, 1, 5000) },
+            1,
+            "terminal input stalled for {filesystem}: {ready}"
+        );
         line.clear();
         stdout.read_line(&mut line).unwrap();
         assert_eq!(line, "terminal input\n");

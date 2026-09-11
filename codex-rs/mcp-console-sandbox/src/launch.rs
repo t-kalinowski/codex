@@ -50,6 +50,7 @@ pub async fn run(request: Bootstrap, stdin: File, signals: Signals) -> Result<i3
     let mut gate = None;
     let mut target = None;
     let mut observation_failed = false;
+    let mut uses_native_setup = true;
     let startup_cancellation = || -> Result<Option<i32>> {
         if !parent
             .as_ref()
@@ -71,7 +72,6 @@ pub async fn run(request: Bootstrap, stdin: File, signals: Signals) -> Result<i3
     };
     let result: Result<i32> = async {
         let (channel, inherited) = UnixStream::pair()?;
-        platform::configure_channel(&channel)?;
         let descriptor = inherited.as_raw_fd();
         let preparation = crate::codex::prepare(
             request,
@@ -91,7 +91,11 @@ pub async fn run(request: Bootstrap, stdin: File, signals: Signals) -> Result<i3
         };
         prepared = Some(native);
         let native = prepared.as_mut().context("prepared native launch")?;
-        gate = Some(Gate::new(channel, &native.setup)?);
+        uses_native_setup = native.uses_native_setup;
+        if uses_native_setup {
+            platform::configure_channel(&channel)?;
+            gate = Some(Gate::new(channel, &native.setup)?);
+        }
         if let Some(status) = startup_cancellation()? {
             return Ok(status);
         }
@@ -105,6 +109,7 @@ pub async fn run(request: Bootstrap, stdin: File, signals: Signals) -> Result<i3
         // the expected parent before fork, never from an already-orphaned child.
         #[cfg(target_os = "linux")]
         let supervisor = unsafe { libc::getpid() };
+        let target_signals = native.setup.signals.clone();
         // SAFETY: the child hook uses only syscalls and allocation-free errors;
         // proxy preparation may already have started other threads.
         unsafe {
@@ -130,8 +135,19 @@ pub async fn run(request: Bootstrap, stdin: File, signals: Signals) -> Result<i3
                         return Err(std::io::Error::from_raw_os_error(error));
                     }
                 }
-                if libc::setpgid(0, 0) < 0 || libc::fcntl(descriptor, libc::F_SETFD, 0) < 0 {
+                // Like bubblewrap targets, external Linux targets use a new
+                // session so inherited terminal reads do not stop with SIGTTIN.
+                let group = if cfg!(target_os = "linux") && !uses_native_setup {
+                    libc::setsid()
+                } else {
+                    libc::setpgid(0, 0)
+                };
+                if group < 0 || (uses_native_setup && libc::fcntl(descriptor, libc::F_SETFD, 0) < 0)
+                {
                     return Err(std::io::Error::last_os_error());
+                }
+                if !uses_native_setup {
+                    target_signals.restore()?;
                 }
                 Ok(())
             });
@@ -171,6 +187,8 @@ pub async fn run(request: Bootstrap, stdin: File, signals: Signals) -> Result<i3
                 if signals.forwards(signal) {
                     if let Some(target) = &target {
                         platform::forward(target, signal)?;
+                    } else if !uses_native_setup {
+                        platform::forward_process_group(root.id() as i32, signal)?;
                     } else {
                         return Ok(128 + signal);
                     }
@@ -219,6 +237,16 @@ pub async fn run(request: Bootstrap, stdin: File, signals: Signals) -> Result<i3
     loop {
         if let Err(error) = signals.pending() {
             errors.push(format!("observe retirement signals: {error}"));
+            retirement_failed = true;
+            break;
+        }
+        // macOS already retires observed descendants and live group members.
+        #[cfg(target_os = "linux")]
+        if !uses_native_setup
+            && let Some(root) = &child
+            && let Err(error) = platform::forward_process_group(root.id() as i32, libc::SIGKILL)
+        {
+            errors.push(format!("retire external sandbox process group: {error}"));
             retirement_failed = true;
             break;
         }

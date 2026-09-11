@@ -6,6 +6,18 @@ mod implementation;
 mod implementation;
 pub use implementation::*;
 
+/// External enforcement has no native init. The unreaped child pins its group;
+/// an outer sandbox is responsible for descendants that leave that group.
+pub fn forward_process_group(root: i32, signal: i32) -> std::io::Result<()> {
+    if unsafe { libc::kill(-root, signal) } < 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::ESRCH) {
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
 /// Observe the owned child without releasing its PID or process-group identity.
 /// Only the supervisor reaps it, after descendant retirement.
 pub fn root_status(pid: i32) -> std::io::Result<Option<i32>> {

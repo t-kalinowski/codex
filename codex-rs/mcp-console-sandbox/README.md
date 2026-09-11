@@ -4,6 +4,8 @@
 
 The default supervisor owns launch, descendant retirement, optional private storage, and the upstream managed proxy. Caller-death and SIGTERM retirement are explicit options. Linux also accepts explicit Landlock execution, which has no supervisor or process isolation. The [lifecycle contract](LIFECYCLE.md) defines cleanup ordering and platform limits, including runner loss; the [Linux compatibility guide](LINUX_COMPATIBILITY.md) defines host requirements.
 
+The [complete JSON configuration reference](PROTOCOL.md#complete-json-reference) covers both transports and every nested field. `filesystem: {"kind":"unrestricted"}` retains the independently selected native network policy. `external-sandbox` delegates enforcement to an outer sandbox unless a managed proxy requires native routing; its Linux supervision covers the original process group.
+
 ## Invocation
 
 Put JSON in one selected child environment variable, and keep arguments, cwd, and ordinary environment values as normal launch inputs:
@@ -54,4 +56,4 @@ The [focused workflow](../../.github/workflows/mcp-console-sandbox.yml) runs mac
 
 The runner initializes no model client, authentication, application session, or OpenTelemetry exporter. There is no runner telemetry or telemetry switch; transitive telemetry dependencies do not activate an exporter. Build tools do not send application telemetry to OpenAI.
 
-With restricted networking and no proxy, the runner performs no application egress. A managed proxy listens and connects according to the supplied upstream policy. With networking enabled, the target may make its own requests. Proxy behavior and environment changes are specified in [PROTOCOL.md](PROTOCOL.md#network-and-target-environment).
+For managed execution with restricted networking and no proxy, native rules restrict target network operations. External execution delegates that enforcement to the caller. A managed proxy listens and connects according to the supplied upstream policy. With networking enabled, the target may make its own requests. Proxy behavior and environment changes are specified in [PROTOCOL.md](PROTOCOL.md#network-and-target-environment).
