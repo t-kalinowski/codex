@@ -66,6 +66,9 @@ pub(crate) struct BwrapOptions {
     pub mount_proc: bool,
     /// How networking should be configured inside the bubblewrap sandbox.
     pub network_mode: BwrapNetworkMode,
+    /// Retain namespace init even when filesystem and network access are full.
+    /// Target setup and supervised lifetime callers need its control channel.
+    pub require_process_isolation: bool,
     /// Optional maximum depth for expanding unreadable glob patterns with ripgrep.
     ///
     /// Keep this uncapped by default so existing nested deny-read matches are
@@ -78,6 +81,7 @@ impl Default for BwrapOptions {
         Self {
             mount_proc: true,
             network_mode: BwrapNetworkMode::FullAccess,
+            require_process_isolation: false,
             glob_scan_max_depth: None,
         }
     }
@@ -229,7 +233,7 @@ impl SyntheticMountTarget {
 /// with explicit writable roots and read-only subpaths layered afterward.
 ///
 /// When the policy grants full disk write access and full network access, this
-/// returns `command` unchanged so we avoid unnecessary sandboxing overhead.
+/// returns `command` unchanged unless process isolation is required.
 /// If network isolation is requested, we still wrap with bubblewrap so network
 /// namespace restrictions apply while preserving full filesystem access.
 pub(crate) fn create_bwrap_command_args(
@@ -244,7 +248,9 @@ pub(crate) fn create_bwrap_command_args(
     // Full disk write normally skips bwrap, but unreadable glob patterns still
     // need concrete bwrap masks for the matches expanded below.
     if file_system_sandbox_policy.has_full_disk_write_access() && unreadable_globs.is_empty() {
-        return if options.network_mode == BwrapNetworkMode::FullAccess {
+        return if options.network_mode == BwrapNetworkMode::FullAccess
+            && !options.require_process_isolation
+        {
             Ok(BwrapArgs {
                 args: command,
                 preserved_files: Vec::new(),

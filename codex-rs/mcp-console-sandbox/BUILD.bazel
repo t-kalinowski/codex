@@ -46,6 +46,7 @@ rust_test(
         "tests/lifecycle/security_tests.rs",
         "tests/lifecycle/startup_tests.rs",
         "tests/lifecycle/terminal_tests.rs",
+        "tests/policy/policy_tests.rs",
         "tests/transport/transport_tests.rs",
     ],
     crate_root = "tests/bootstrap_contract.rs",

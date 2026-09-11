@@ -18,12 +18,18 @@ mod upstream {
     use codex_network_proxy::NetworkProxyState;
     pub use codex_network_proxy::RemoteNetworkProxyConfig;
     use codex_network_proxy::RemoteNetworkProxyLaunchConfig;
+    use codex_protocol::config_types::WindowsSandboxLevel;
+    use codex_protocol::models::PermissionProfile;
+    use codex_protocol::models::SandboxEnforcement;
     use codex_protocol::permissions::FileSystemAccessMode;
     use codex_protocol::permissions::FileSystemPath;
     use codex_protocol::permissions::FileSystemSandboxEntry;
     use codex_protocol::permissions::FileSystemSandboxPolicy;
     pub use codex_protocol::permissions::NetworkSandboxPolicy;
     pub use codex_protocol::permissions::RawFileSystemSandboxPolicy;
+    use codex_sandboxing::SandboxManager;
+    use codex_sandboxing::SandboxType;
+    use codex_sandboxing::SandboxablePreference;
     pub use codex_utils_absolute_path::AbsolutePathBuf;
     use std::os::fd::RawFd;
     use std::process::Command;
@@ -32,6 +38,7 @@ mod upstream {
     pub struct Prepared {
         pub command: Option<Command>,
         pub setup: TargetSetup,
+        pub uses_native_setup: bool,
         proxy: Option<NetworkProxyHandle>,
     }
 
@@ -86,11 +93,32 @@ mod upstream {
                 );
             }
         }
-        #[cfg(target_os = "linux")]
+        let permissions = PermissionProfile::from_runtime_permissions(&filesystem, request.network);
+        let filesystem = permissions.file_system_sandbox_policy();
+        let manager = SandboxManager::default();
+        // Managed launches require native init for target setup and retirement,
+        // even when no filesystem or network restrictions were requested.
+        // External enforcement delegates both policies, unless a managed proxy
+        // requires the upstream native network path.
+        let sandbox = manager.select_initial(
+            &permissions,
+            match permissions.enforcement() {
+                SandboxEnforcement::External => SandboxablePreference::Auto,
+                SandboxEnforcement::Managed | SandboxEnforcement::Disabled => {
+                    SandboxablePreference::Require
+                }
+            },
+            WindowsSandboxLevel::Disabled,
+            request.proxy.is_some(),
+        );
         ensure!(
-            request.linux_backend == Some(crate::config::LinuxBackend::Landlock)
-                || !filesystem.has_full_disk_write_access(),
-            "supervised Linux execution requires a restricted filesystem policy"
+            permissions.enforcement() != SandboxEnforcement::External
+                || request.linux_backend != Some(crate::config::LinuxBackend::Landlock),
+            "external-sandbox delegates enforcement; omit the legacy landlock override"
+        );
+        ensure!(
+            sandbox != SandboxType::None || request.macos_seatbelt_profile_extension.is_none(),
+            "a Seatbelt extension requires native enforcement"
         );
         #[cfg(target_os = "linux")]
         if request.linux_backend == Some(crate::config::LinuxBackend::Landlock)
@@ -147,6 +175,20 @@ mod upstream {
             seatbelt: None,
         };
 
+        if sandbox == SandboxType::None {
+            let mut command = Command::new(&setup.command[0]);
+            command
+                .args(&setup.command[1..])
+                .current_dir(request.cwd.as_path())
+                .env_clear()
+                .envs(&setup.environment);
+            return Ok(Prepared {
+                command: Some(command),
+                setup,
+                uses_native_setup: false,
+                proxy: None,
+            });
+        }
         #[cfg(target_os = "macos")]
         let (mut command, setup) = {
             let mut setup = setup;
@@ -174,7 +216,9 @@ mod upstream {
             profile
                 .policy
                 .push_str("\n(deny process-info-pidinfo (require-not (target same-sandbox)))\n");
-            if let Some(storage) = storage {
+            if let Some(storage) = storage
+                && !filesystem.has_full_disk_write_access()
+            {
                 // Disposable data may replace its own root; unlike an upstream
                 // writable authority, this path is never reused for another job.
                 profile
@@ -208,15 +252,9 @@ mod upstream {
         };
         #[cfg(target_os = "linux")]
         let mut command = {
-            use codex_protocol::config_types::WindowsSandboxLevel;
-            use codex_protocol::models::PermissionProfile;
             use codex_sandboxing::SandboxCommand;
-            use codex_sandboxing::SandboxManager;
             use codex_sandboxing::SandboxTransformRequest;
-            use codex_sandboxing::SandboxType;
             use codex_utils_path_uri::PathUri;
-            let permissions =
-                PermissionProfile::from_runtime_permissions(&filesystem, request.network);
             let cwd = PathUri::from(request.cwd.clone());
             let executable = std::env::current_exe()?;
             // Target PATH, TMPDIR, loader, proxy and control-looking variables
@@ -241,7 +279,7 @@ mod upstream {
                 );
             }
             helper_env.extend(proxy_environment);
-            let native = SandboxManager::default().transform(SandboxTransformRequest {
+            let native = manager.transform(SandboxTransformRequest {
                 command: SandboxCommand {
                     program: setup.command[0].clone().into(),
                     args: setup.command[1..].to_vec(),
@@ -251,7 +289,7 @@ mod upstream {
                     additional_permissions: None,
                 },
                 permissions: &permissions,
-                sandbox: SandboxType::LinuxSeccomp,
+                sandbox,
                 enforce_managed_network: proxy.is_some(),
                 environment_id: None,
                 network: proxy.as_ref(),
@@ -282,6 +320,7 @@ mod upstream {
         Ok(Prepared {
             command: Some(command),
             setup,
+            uses_native_setup: true,
             proxy: handle,
         })
     }
