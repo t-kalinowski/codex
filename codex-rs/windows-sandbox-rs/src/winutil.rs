@@ -190,8 +190,9 @@ pub fn ensure_sandbox_users_group() -> Result<Vec<u8>> {
     const ERROR_ALIAS_EXISTS: u32 = 1379;
     const NERR_GROUP_EXISTS: u32 = 2223;
 
-    let name = to_wide(SANDBOX_USERS_GROUP);
-    let comment = to_wide(SANDBOX_USERS_GROUP_COMMENT);
+    let group = crate::sandbox_name(SANDBOX_USERS_GROUP);
+    let name = to_wide(group.as_ref());
+    let comment = to_wide(crate::sandbox_name(SANDBOX_USERS_GROUP_COMMENT).as_ref());
     let info = LOCALGROUP_INFO_1 {
         lgrpi1_name: name.as_ptr() as *mut u16,
         lgrpi1_comment: comment.as_ptr() as *mut u16,
@@ -207,11 +208,11 @@ pub fn ensure_sandbox_users_group() -> Result<Vec<u8>> {
     };
     if status != NERR_Success && status != ERROR_ALIAS_EXISTS && status != NERR_GROUP_EXISTS {
         return Err(anyhow::anyhow!(
-            "NetLocalGroupAdd failed for {SANDBOX_USERS_GROUP} code {status} parm_err={parameter_error}"
+            "NetLocalGroupAdd failed for {group} code {status} parm_err={parameter_error}"
         ));
     }
 
-    resolve_sid(SANDBOX_USERS_GROUP)
+    resolve_sid(&crate::sandbox_name(SANDBOX_USERS_GROUP))
 }
 
 pub fn resolve_sid(name: &str) -> Result<Vec<u8>> {

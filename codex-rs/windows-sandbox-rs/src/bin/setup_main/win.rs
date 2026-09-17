@@ -456,7 +456,10 @@ pub fn main() -> Result<()> {
     let ret = real_main(&mut setup_mode);
     if let Err(e) = &ret {
         // Best-effort: log unexpected top-level errors.
-        if let Ok(codex_home) = std::env::var("CODEX_HOME") {
+        if codex_windows_sandbox::WindowsSandboxProduct::current()
+            == codex_windows_sandbox::WindowsSandboxProduct::Codex
+            && let Ok(codex_home) = std::env::var("CODEX_HOME")
+        {
             let sbx_dir = sandbox_dir(Path::new(&codex_home));
             let _ = std::fs::create_dir_all(&sbx_dir);
             // An unparsed payload must not enable writes to an existing log.
@@ -507,6 +510,13 @@ fn real_main(setup_mode: &mut Option<SetupMode>) -> Result<()> {
         ))
     })?;
     *setup_mode = Some(payload.mode);
+    if payload.offline_username
+        != codex_windows_sandbox::sandbox_name(codex_windows_sandbox::OFFLINE_USERNAME)
+        || payload.online_username
+            != codex_windows_sandbox::sandbox_name(codex_windows_sandbox::ONLINE_USERNAME)
+    {
+        anyhow::bail!("sandbox account names do not match this setup helper");
+    }
     if payload.version != SETUP_VERSION {
         return Err(anyhow::Error::new(SetupFailure::new(
             SetupErrorCode::HelperRequestArgsFailed,

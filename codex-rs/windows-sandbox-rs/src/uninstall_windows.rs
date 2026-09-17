@@ -54,11 +54,14 @@ pub fn clean_up_packaged_windows_sandbox(
     for result in [
         crate::wfp::remove_wfp_filters(),
         firewall::cleanup_firewall_rules(),
-        principals::remove_sandbox_principal("CodexSandboxUsers"),
-        crate::hide_users::unhide_sandbox_users(&[OFFLINE_USERNAME, ONLINE_USERNAME]),
+        principals::remove_sandbox_principal(crate::sandbox_name("CodexSandboxUsers").as_ref()),
+        crate::hide_users::unhide_sandbox_users(&[
+            crate::sandbox_name(OFFLINE_USERNAME).as_ref(),
+            crate::sandbox_name(ONLINE_USERNAME).as_ref(),
+        ]),
         // Keep accounts disabled and setup locked until shared cleanup and account deletion finish.
-        principals::remove_sandbox_principal(OFFLINE_USERNAME),
-        principals::remove_sandbox_principal(ONLINE_USERNAME),
+        principals::remove_sandbox_principal(&crate::sandbox_name(OFFLINE_USERNAME)),
+        principals::remove_sandbox_principal(&crate::sandbox_name(ONLINE_USERNAME)),
     ] {
         if let Err(error) = result {
             errors.push(format!("{error:#}"));

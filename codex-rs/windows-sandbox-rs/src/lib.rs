@@ -87,6 +87,12 @@ mod path_normalization;
 #[cfg(target_os = "windows")]
 mod process;
 #[cfg(target_os = "windows")]
+mod product;
+#[cfg(target_os = "windows")]
+pub use product::WindowsSandboxProduct;
+#[cfg(target_os = "windows")]
+pub use product::sandbox_name;
+#[cfg(target_os = "windows")]
 mod provisioning_client;
 #[cfg(target_os = "windows")]
 mod provisioning_protocol;
@@ -216,6 +222,8 @@ pub use helper_materialization::resolve_exe_for_launch;
 pub use hide_users::hide_current_user_profile_dir;
 #[cfg(target_os = "windows")]
 pub use hide_users::hide_newly_created_users;
+#[cfg(target_os = "windows")]
+pub use identity::check_sandbox_setup;
 #[cfg(target_os = "windows")]
 pub use identity::require_logon_sandbox_creds;
 #[cfg(target_os = "windows")]
@@ -423,6 +431,8 @@ pub use workspace_acl::is_command_cwd_root;
 pub use wrapper::CODEX_WINDOWS_SANDBOX_ARG1;
 #[cfg(target_os = "windows")]
 pub use wrapper::create_windows_sandbox_command_args_for_permission_profile;
+#[cfg(target_os = "windows")]
+pub use wrapper::run_windows_sandbox_wrapper_args;
 #[cfg(target_os = "windows")]
 pub use wrapper::run_windows_sandbox_wrapper_main;
 

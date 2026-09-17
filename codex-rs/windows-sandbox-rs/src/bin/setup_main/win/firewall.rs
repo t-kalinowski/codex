@@ -210,7 +210,7 @@ fn remove_rule_if_present(
     internal_name: &str,
     log: &mut dyn Write,
 ) -> Result<()> {
-    let name = BSTR::from(internal_name);
+    let name = BSTR::from(codex_windows_sandbox::sandbox_name(internal_name).as_ref());
     if unsafe { rules.Item(&name) }.is_ok() {
         unsafe { rules.Remove(&name) }.map_err(|err| {
             anyhow::Error::new(SetupFailure::new(
@@ -274,7 +274,7 @@ fn ensure_block_rule(
     spec: &BlockRuleSpec<'_>,
     log: &mut dyn Write,
 ) -> Result<()> {
-    let name = BSTR::from(spec.internal_name);
+    let name = BSTR::from(codex_windows_sandbox::sandbox_name(spec.internal_name).as_ref());
     let rule: INetFwRule3 = match unsafe { rules.Item(&name) } {
         Ok(existing) => existing.cast().map_err(|err| {
             anyhow::Error::new(SetupFailure::new(
@@ -328,13 +328,15 @@ fn ensure_block_rule(
 
 fn configure_rule(rule: &INetFwRule3, spec: &BlockRuleSpec<'_>) -> Result<()> {
     unsafe {
-        rule.SetDescription(&BSTR::from(spec.friendly_desc))
-            .map_err(|err| {
-                anyhow::Error::new(SetupFailure::new(
-                    SetupErrorCode::HelperFirewallRuleCreateOrAddFailed,
-                    format!("SetDescription failed: {err:?}"),
-                ))
-            })?;
+        rule.SetDescription(&BSTR::from(
+            codex_windows_sandbox::sandbox_name(spec.friendly_desc).as_ref(),
+        ))
+        .map_err(|err| {
+            anyhow::Error::new(SetupFailure::new(
+                SetupErrorCode::HelperFirewallRuleCreateOrAddFailed,
+                format!("SetDescription failed: {err:?}"),
+            ))
+        })?;
         rule.SetDirection(NET_FW_RULE_DIR_OUT).map_err(|err| {
             anyhow::Error::new(SetupFailure::new(
                 SetupErrorCode::HelperFirewallRuleCreateOrAddFailed,

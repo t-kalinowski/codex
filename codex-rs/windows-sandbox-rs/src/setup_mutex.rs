@@ -60,7 +60,7 @@ pub fn acquire_sandbox_setup_lock(timeout_ms: u32) -> Result<SandboxSetupLock> {
         lpSecurityDescriptor: descriptor,
         bInheritHandle: 0,
     };
-    let name = to_wide(r"Global\CodexSandboxSetup");
+    let name = to_wide(crate::sandbox_name(r"Global\CodexSandboxSetup").as_ref());
     let handle = unsafe {
         CreateMutexW(&attributes, /*binitialowner*/ 0, name.as_ptr())
     };

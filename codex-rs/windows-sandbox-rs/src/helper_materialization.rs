@@ -25,9 +25,9 @@ pub(crate) enum HelperExecutable {
 }
 
 impl HelperExecutable {
-    fn file_name(self) -> &'static str {
+    fn file_name(self) -> std::borrow::Cow<'static, str> {
         match self {
-            Self::CommandRunner => "codex-command-runner.exe",
+            Self::CommandRunner => crate::sandbox_name("codex-command-runner.exe"),
         }
     }
 
@@ -52,11 +52,11 @@ pub(crate) fn helper_bin_dir(codex_home: &Path) -> PathBuf {
 
 pub(crate) fn legacy_lookup(kind: HelperExecutable) -> PathBuf {
     if let Ok(exe) = std::env::current_exe()
-        && let Some(candidate) = bundled_executable_path_for_exe(&exe, kind.file_name())
+        && let Some(candidate) = bundled_executable_path_for_exe(&exe, &kind.file_name())
     {
         return candidate;
     }
-    PathBuf::from(kind.file_name())
+    PathBuf::from(kind.file_name().as_ref())
 }
 
 pub(crate) fn resolve_helper_for_launch(
@@ -183,7 +183,7 @@ fn store_helper_path(cache_key: String, path: PathBuf) {
 
 fn sibling_source_path(kind: HelperExecutable) -> Result<PathBuf> {
     let exe = std::env::current_exe().context("resolve current executable for helper lookup")?;
-    bundled_executable_path_for_exe(&exe, kind.file_name()).ok_or_else(|| {
+    bundled_executable_path_for_exe(&exe, &kind.file_name()).ok_or_else(|| {
         anyhow!(
             "helper not found next to current executable or under {RESOURCES_DIRNAME}: {}",
             exe.display()
@@ -228,11 +228,11 @@ fn helper_destination_for_source(
 
 fn materialized_file_name(kind: HelperExecutable, suffix: &str) -> String {
     let source_name = kind.file_name();
-    let path = Path::new(source_name);
+    let path = Path::new(source_name.as_ref());
     let stem = path
         .file_stem()
         .and_then(|stem| stem.to_str())
-        .unwrap_or(source_name);
+        .unwrap_or(source_name.as_ref());
     let extension = path
         .extension()
         .and_then(|ext| ext.to_str())

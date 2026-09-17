@@ -18,6 +18,8 @@ mod profiles;
 mod signals;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod storage;
+#[cfg(windows)]
+mod windows;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn main() {
@@ -108,17 +110,13 @@ fn run() -> anyhow::Result<i32> {
 
 #[cfg(windows)]
 fn main() {
-    if std::env::args_os().nth(1).as_deref()
-        == Some(std::ffi::OsStr::new(
-            codex_windows_sandbox::CODEX_WINDOWS_SANDBOX_ARG1,
-        ))
-    {
-        codex_windows_sandbox::run_windows_sandbox_wrapper_main();
+    match windows::run() {
+        Ok(code) => std::process::exit(code),
+        Err(error) => {
+            eprintln!("mcp-console-sandbox: {error:#}");
+            std::process::exit(1);
+        }
     }
-    eprintln!(
-        "mcp-console-sandbox: Windows requires --run-as-windows-sandbox with native Windows arguments; --config-env and --bootstrap-fd are not supported (see WINDOWS.md)"
-    );
-    std::process::exit(1);
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]

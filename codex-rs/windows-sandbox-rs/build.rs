@@ -18,22 +18,23 @@ fn main() -> Result<(), String> {
 
     // Keep this scoped to the setup helper so Codex binaries that link the
     // library do not inherit any resource metadata from this package.
-    match (
-        env::var("CARGO_CFG_TARGET_ENV").as_deref(),
-        env::var("CARGO_CFG_TARGET_ABI").as_deref(),
-    ) {
-        (Ok("msvc"), _) => {
-            println!("cargo:rustc-link-arg-bin={SETUP_BIN}=/MANIFEST:EMBED");
-            println!("cargo:rustc-link-arg-bin={SETUP_BIN}=/MANIFESTINPUT:{manifest_path}");
+    for setup_bin in [SETUP_BIN, "mcp-console-sandbox-setup"] {
+        match (
+            env::var("CARGO_CFG_TARGET_ENV").as_deref(),
+            env::var("CARGO_CFG_TARGET_ABI").as_deref(),
+        ) {
+            (Ok("msvc"), _) => {
+                println!("cargo:rustc-link-arg-bin={setup_bin}=/MANIFEST:EMBED");
+                println!("cargo:rustc-link-arg-bin={setup_bin}=/MANIFESTINPUT:{manifest_path}");
+            }
+            (Ok("gnu"), Ok("llvm")) => {
+                println!("cargo:rustc-link-arg-bin={setup_bin}=-Wl,-Xlink=/manifest:embed");
+                println!(
+                    "cargo:rustc-link-arg-bin={setup_bin}=-Wl,-Xlink=/manifestinput:{manifest_path}"
+                );
+            }
+            _ => {}
         }
-        (Ok("gnu"), Ok("llvm")) => {
-            println!("cargo:rustc-link-arg-bin={SETUP_BIN}=-Wl,-Xlink=/manifest:embed");
-            println!(
-                "cargo:rustc-link-arg-bin={SETUP_BIN}=-Wl,-Xlink=/manifestinput:{manifest_path}"
-            );
-        }
-        _ => {}
     }
-
     Ok(())
 }

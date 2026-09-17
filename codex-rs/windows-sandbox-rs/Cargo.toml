@@ -22,6 +22,16 @@ path = "src/bin/command_runner/main.rs"
 name = "codex-windows-managed-deny-probe"
 path = "src/bin/managed_deny_probe/main.rs"
 
+[[bin]]
+name = "mcp-console-sandbox-setup"
+path = "src/bin/setup_main/console.rs"
+test = false
+
+[[bin]]
+name = "mcp-console-sandbox-runner"
+path = "src/bin/command_runner/console.rs"
+test = false
+
 [lints]
 workspace = true
 

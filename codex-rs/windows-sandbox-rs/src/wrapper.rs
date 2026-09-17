@@ -151,7 +151,8 @@ pub fn run_windows_sandbox_wrapper_main() -> ! {
     std::process::exit(exit_code);
 }
 
-async fn run_windows_sandbox_wrapper_args(args: Vec<String>) -> Result<i32> {
+/// Runs the native Windows wrapper with explicit metadata arguments and a command.
+pub async fn run_windows_sandbox_wrapper_args(args: Vec<String>) -> Result<i32> {
     let request = parse_windows_sandbox_wrapper_args(args)?;
     run_windows_sandbox_wrapper_request(request).await
 }
