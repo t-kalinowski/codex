@@ -95,6 +95,8 @@ pub(crate) fn run() -> Result<i32> {
     } else {
         WindowsSandboxProxySettingsMode::Reconcile
     };
+    // The shared session API needs Tokio to coordinate process exit, Ctrl+C,
+    // stdin EOF, and output-drain timeouts.
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?

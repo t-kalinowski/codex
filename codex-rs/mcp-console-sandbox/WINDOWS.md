@@ -11,8 +11,7 @@ The Windows `run` command consumes native Windows options and a serialized
 `--config-env` and `--bootstrap-fd` remain unsupported.
 
 The Windows CLI uses Clap. Run `--help` or `run --help` for available options.
-`--state-dir` can appear before or after the subcommand; `--codex-home` remains
-its compatibility alias. `--run-as-windows-sandbox` remains an alias for `run`.
+`--state-dir` can appear before or after the subcommand.
 Options accept both `--name value` and `--name=value`. The target command must
 follow `--`, and its remaining arguments are passed through unchanged. CLI
 syntax errors exit with code 2 before any setup or launch; help exits with code 0.
@@ -118,8 +117,7 @@ validation and enforcement.
 The default backend is `elevated`. Pass `--windows-sandbox-level restricted-token`
 to use the limited backend without account provisioning. An empty read allowlist,
 external enforcement, and unrestricted managed filesystem policies are not
-supported by the restricted-token path. The previous `--run-as-windows-sandbox`
-invocation and `--codex-home` flag remain accepted as compatibility aliases.
+supported by the restricted-token path.
 
 The example leaves its workspace under `target/windows-sandbox-example` and
 its persistent sandbox state under `%LOCALAPPDATA%\mcp-console`.
@@ -184,9 +182,9 @@ reported an unsupported platform. Removing the platform gates would not port it:
 
 The `windows_native` executable tests cover default state-directory selection
 without creating state and rejection of another product's account records before
-setup or launch. The `windows_cli` tests cover help snapshots, validation before
-state creation, compatibility aliases, target argument preservation, and shared
-backend validation. Five additional local prototype tests cover mode selection,
+setup or launch. The `windows_cli` tests cover custom path and JSON validation
+before state creation, target argument preservation, and shared backend
+validation. Five additional local prototype tests cover mode selection,
 stdio and exit propagation, write restrictions, and policy rejection. They are
 not included in this change. These checks do not establish parity with the
 Linux/macOS lifecycle contract or validate the elevated backend. A complete

@@ -24,7 +24,7 @@ use std::str::FromStr;
 )]
 pub(crate) struct Cli {
     /// Persistent sandbox state directory (absolute path).
-    #[arg(long, alias = "codex-home", global = true, value_name = "PATH", value_parser = absolute_path_parser())]
+    #[arg(long, global = true, value_name = "PATH", value_parser = absolute_path_parser())]
     pub state_dir: Option<AbsolutePathBuf>,
 
     #[command(subcommand)]
@@ -38,7 +38,6 @@ pub(crate) enum Action {
     /// Report setup records, accounts, and packaged helpers as JSON.
     Status,
     /// Run a command with the supplied permissions and environment.
-    #[command(long_flag = "run-as-windows-sandbox")]
     Run(Box<RunArgs>),
 }
 

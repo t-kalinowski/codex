@@ -3868,7 +3868,6 @@ dependencies = [
  "codex-utils-cargo-bin",
  "codex-utils-path-uri",
  "codex-windows-sandbox",
- "insta",
  "libc",
  "openssl-sys",
  "pretty_assertions",

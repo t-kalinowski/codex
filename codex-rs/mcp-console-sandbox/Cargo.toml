@@ -45,9 +45,6 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt"] }
 
-[target.'cfg(windows)'.dev-dependencies]
-insta = { workspace = true }
-
 # Match the release binaries' native linkage without depending on codex-core
 # to enable this feature through Cargo's workspace feature unification.
 [target.x86_64-unknown-linux-musl.dependencies]
