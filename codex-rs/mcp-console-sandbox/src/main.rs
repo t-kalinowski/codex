@@ -106,7 +106,22 @@ fn run() -> anyhow::Result<i32> {
         })
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(windows)]
+fn main() {
+    if std::env::args_os().nth(1).as_deref()
+        == Some(std::ffi::OsStr::new(
+            codex_windows_sandbox::CODEX_WINDOWS_SANDBOX_ARG1,
+        ))
+    {
+        codex_windows_sandbox::run_windows_sandbox_wrapper_main();
+    }
+    eprintln!(
+        "mcp-console-sandbox: Windows requires --run-as-windows-sandbox with native Windows arguments; --config-env and --bootstrap-fd are not supported (see WINDOWS.md)"
+    );
+    std::process::exit(1);
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn main() {
     eprintln!("mcp-console-sandbox: native runner is supported only on Linux and macOS");
     std::process::exit(1);
