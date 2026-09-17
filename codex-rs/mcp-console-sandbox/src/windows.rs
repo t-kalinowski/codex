@@ -94,8 +94,8 @@ pub(crate) fn run() -> Result<i32> {
                     "state_dir": state_dir,
                     "configured": configured,
                     "helpers_available": helpers_available,
-                    "offline_account": "ConsoleSandboxOff",
-                    "online_account": "ConsoleSandboxOn",
+                    "offline_account": "McpConsoleSandboxOff",
+                    "online_account": "McpConsoleSandboxOn",
                 })
             );
             return Ok(if configured && helpers_available {

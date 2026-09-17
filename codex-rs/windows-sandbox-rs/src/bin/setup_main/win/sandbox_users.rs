@@ -107,8 +107,8 @@ pub fn ensure_sandbox_user(
         == codex_windows_sandbox::WindowsSandboxProduct::Console
     {
         let display_name = match username {
-            "ConsoleSandboxOff" => "Console Sandbox Offline",
-            "ConsoleSandboxOn" => "Console Sandbox Online",
+            "McpConsoleSandboxOff" => "McpConsoleSandboxOffline",
+            "McpConsoleSandboxOn" => "McpConsoleSandboxOnline",
             _ => anyhow::bail!("unexpected Console sandbox account: {username}"),
         };
         let name = to_wide(username);

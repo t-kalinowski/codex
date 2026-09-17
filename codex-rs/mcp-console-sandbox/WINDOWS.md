@@ -55,8 +55,8 @@ State defaults to `%LOCALAPPDATA%\mcp-console`. Each command accepts
 user; accounts and network policy are machine resources, so separate state
 directories are not independent installations. No provisioning service is needed.
 
-The display names are **Console Sandbox Offline** and **Console Sandbox Online**.
-Their login names are `ConsoleSandboxOff` and `ConsoleSandboxOn` because Windows
+The display names are **McpConsoleSandboxOffline** and **McpConsoleSandboxOnline**.
+Their login names are `McpConsoleSandboxOff` and `McpConsoleSandboxOn` because Windows
 limits local account names to 20 characters. Setup uses `ConsoleSandboxUsers` and
 separate Console firewall rules and WFP identifiers. Existing Codex resources keep
 their names and identifiers. A state directory containing another product's
