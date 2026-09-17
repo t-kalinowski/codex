@@ -3859,6 +3859,7 @@ name = "codex-mcp-console-sandbox"
 version = "0.154.0"
 dependencies = [
  "anyhow",
+ "clap",
  "codex-linux-sandbox",
  "codex-network-proxy",
  "codex-protocol",
@@ -3867,6 +3868,7 @@ dependencies = [
  "codex-utils-cargo-bin",
  "codex-utils-path-uri",
  "codex-windows-sandbox",
+ "insta",
  "libc",
  "openssl-sys",
  "pretty_assertions",

@@ -43,11 +43,19 @@ fn console_refuses_other_products_state_before_setup_or_launch() {
     .to_string();
     std::fs::write(secrets.join("sandbox_users.json"), &contents).expect("users");
     for action in ["setup", "status", "run"] {
-        let output = Command::new(cargo_bin("mcp-console-sandbox").expect("runner binary"))
-            .args([action, "--state-dir"])
-            .arg(root.path())
-            .output()
-            .expect("runner");
+        let mut command = Command::new(cargo_bin("mcp-console-sandbox").expect("runner binary"));
+        command.args([action, "--state-dir"]).arg(root.path());
+        if action == "run" {
+            command.arg("--command-cwd").arg(root.path()).args([
+                "--permission-profile",
+                r#"{"type":"external","network":"enabled"}"#,
+                "--env-json",
+                "{}",
+                "--",
+                "cmd.exe",
+            ]);
+        }
+        let output = command.output().expect("runner");
         assert_eq!(output.status.code(), Some(1));
         assert!(
             String::from_utf8(output.stderr)

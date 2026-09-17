@@ -33,6 +33,21 @@ rust_binary(
 )
 
 rust_test(
+    name = "windows-cli-test",
+    srcs = ["tests/windows_cli.rs"],
+    crate_root = "tests/windows_cli.rs",
+    data = [":mcp-console-sandbox"],
+    edition = "2024",
+    env = {"CARGO_BIN_EXE_mcp-console-sandbox": "$(rlocationpath :mcp-console-sandbox)"},
+    tags = ["no-sandbox"],
+    target_compatible_with = ["@platforms//os:windows"],
+    deps = all_crate_deps(
+        normal = True,
+        normal_dev = True,
+    ),
+)
+
+rust_test(
     name = "windows-native-test",
     srcs = ["tests/windows_native.rs"],
     crate_root = "tests/windows_native.rs",

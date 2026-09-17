@@ -20,6 +20,8 @@ mod signals;
 mod storage;
 #[cfg(windows)]
 mod windows;
+#[cfg(windows)]
+mod windows_cli;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn main() {

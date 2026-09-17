@@ -10,6 +10,13 @@ The Windows `run` command consumes native Windows options and a serialized
 `PermissionProfile`, not the versioned request in [PROTOCOL.md](PROTOCOL.md).
 `--config-env` and `--bootstrap-fd` remain unsupported.
 
+The Windows CLI uses Clap. Run `--help` or `run --help` for available options.
+`--state-dir` can appear before or after the subcommand; `--codex-home` remains
+its compatibility alias. `--run-as-windows-sandbox` remains an alias for `run`.
+Options accept both `--name value` and `--name=value`. The target command must
+follow `--`, and its remaining arguments are passed through unchanged. CLI
+syntax errors exit with code 2 before any setup or launch; help exits with code 0.
+
 ## Build
 
 Install Rust 1.95.0 with the `x86_64-pc-windows-msvc` toolchain, Visual Studio C++
@@ -105,8 +112,9 @@ print("exit:", result.returncode)
 ```
 
 Omit the write entry for read-only execution. Explicit workspace roots can also
-be passed with repeated `--workspace-root` flags. Native Windows argument parsing
-and permission validation remain owned by `windows-sandbox-rs/src/wrapper.rs`.
+be passed with repeated `--workspace-root` flags. Clap parses the standalone CLI
+into a typed Windows session request; the shared Windows backend owns permission
+validation and enforcement.
 The default backend is `elevated`. Pass `--windows-sandbox-level restricted-token`
 to use the limited backend without account provisioning. An empty read allowlist,
 external enforcement, and unrestricted managed filesystem policies are not
@@ -176,7 +184,9 @@ reported an unsupported platform. Removing the platform gates would not port it:
 
 The `windows_native` executable tests cover default state-directory selection
 without creating state and rejection of another product's account records before
-setup or launch. Five additional local prototype tests cover mode selection,
+setup or launch. The `windows_cli` tests cover help snapshots, validation before
+state creation, compatibility aliases, target argument preservation, and shared
+backend validation. Five additional local prototype tests cover mode selection,
 stdio and exit propagation, write restrictions, and policy rejection. They are
 not included in this change. These checks do not establish parity with the
 Linux/macOS lifecycle contract or validate the elevated backend. A complete
